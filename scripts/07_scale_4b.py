@@ -27,7 +27,7 @@ from src.evaluation.cold_start import ColdStartEvaluator
 from src.evaluation.metrics import compute_metrics
 from src.models.scoring import ReviewScorer
 from src.models.sglang_server import SGLangServer
-from src.training.grpo import RLCRTrainer, GRPORunConfig, build_training_dataset
+from src.training.grpo import train_all_teams
 from transformers import AutoTokenizer
 
 console = Console()
@@ -68,42 +68,24 @@ def main():
     # --- Train with larger model ---
     if not args.eval_only:
         console.rule("[bold]Training with larger model[/bold]")
-        tokenizer = AutoTokenizer.from_pretrained(large_model, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        console.print(f"[cyan]Model loaded once, LoRA swapped per team[/cyan]")
 
-        for team_name, team in teams_to_run.items():
-            console.print(f"\n[cyan]Training {team_name} with {large_model}[/cyan]")
-
-            train_dicts = [s.to_dict() for s in team.train_samples]
-            eval_dicts = [s.to_dict() for s in team.test_samples[:50]]
-
-            train_ds = build_training_dataset(
-                train_dicts, team_name, team.description, team.vote_history, tokenizer
-            )
-            eval_ds = build_training_dataset(
-                eval_dicts, team_name, team.description, team.vote_history, tokenizer
-            )
-
-            run_config = GRPORunConfig(
-                model_name=large_model,
-                output_dir=f"outputs/grpo_large/{team_name}",
-                team_name=team_name,
-                team_description=team.description,
-                vote_history=team.vote_history,
-                lora_r=cfg.training.lora.r,
-                lora_alpha=cfg.training.lora.alpha,
-                group_size=cfg.training.grpo.group_size,
-                learning_rate=cfg.training.grpo.learning_rate,
-                num_epochs=cfg.training.grpo.num_epochs,
-                per_device_batch_size=max(1, cfg.training.grpo.per_device_batch_size // 2),
-                gradient_accumulation_steps=cfg.training.grpo.gradient_accumulation_steps * 2,
-                seed=cfg.project.seed,
-                sglang_url=sglang_url,
-            )
-
-            trainer = RLCRTrainer(run_config)
-            trainer.train(train_ds, eval_ds)
+        config_dict = {
+            "model_name": large_model,
+            "base_output_dir": "outputs/grpo_large",
+            "lora_r": cfg.training.lora.r,
+            "lora_alpha": cfg.training.lora.alpha,
+            "lora_dropout": cfg.training.lora.get("dropout", 0.05),
+            "lora_target_modules": list(cfg.training.lora.target_modules),
+            "group_size": cfg.training.grpo.group_size,
+            "learning_rate": cfg.training.grpo.learning_rate,
+            "num_epochs": cfg.training.grpo.num_epochs,
+            "per_device_batch_size": max(1, cfg.training.grpo.per_device_batch_size // 2),
+            "gradient_accumulation_steps": cfg.training.grpo.gradient_accumulation_steps * 2,
+            "seed": cfg.project.seed,
+            "sglang_url": sglang_url,
+        }
+        train_all_teams(teams_to_run, config_dict)
 
     # --- Evaluate both models ---
     console.rule("[bold]Comparing models[/bold]")

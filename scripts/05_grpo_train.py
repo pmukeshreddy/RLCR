@@ -4,14 +4,15 @@
 Trains per-team scoring policies using Group Relative Policy Optimization:
   - Reward = address rate from CodeReviewer labels
   - LoRA adapters for memory efficiency
-  - Ray distribution across teams (default)
+  - Loads base model once, swaps LoRA per team (efficient single-GPU default)
+  - Optional: --ray for multi-GPU parallel training
 
 Uses Qwen3-4B by default (cfg.model.large). Pass --small to use Qwen3-1.7B.
 
 Usage:
-    python scripts/05_grpo_train.py                    # All teams, Ray, Qwen3-4B
+    python scripts/05_grpo_train.py                    # All teams, Qwen3-4B
     python scripts/05_grpo_train.py --team security    # Single team
-    python scripts/05_grpo_train.py --no-ray           # Sequential training
+    python scripts/05_grpo_train.py --ray              # Multi-GPU via Ray
     python scripts/05_grpo_train.py --small            # Use Qwen3-1.7B instead
 """
 
@@ -34,6 +35,7 @@ from src.training.grpo import (
     RLCRTrainer,
     GRPORunConfig,
     build_training_dataset,
+    train_all_teams,
     train_all_teams_ray,
 )
 from transformers import AutoTokenizer
@@ -42,7 +44,7 @@ console = Console()
 
 
 def train_single_team(team_name: str, team, model_name: str, sglang_url: str | None, cfg, tokenizer):
-    """Train GRPO on a single team."""
+    """Train GRPO on a single team (standalone, loads its own model)."""
     console.print(f"\n[bold cyan]Training team: {team_name}[/bold cyan]")
 
     train_dicts = [s.to_dict() for s in team.train_samples]
@@ -86,18 +88,36 @@ def train_single_team(team_name: str, team, model_name: str, sglang_url: str | N
     return result
 
 
+def _build_config_dict(model_name: str, sglang_url: str | None, cfg) -> dict:
+    """Build config dict for train_all_teams / train_all_teams_ray."""
+    return {
+        "model_name": model_name,
+        "base_output_dir": "outputs/grpo",
+        "lora_r": cfg.training.lora.r,
+        "lora_alpha": cfg.training.lora.alpha,
+        "lora_dropout": cfg.training.lora.dropout,
+        "lora_target_modules": list(cfg.training.lora.target_modules),
+        "group_size": cfg.training.grpo.group_size,
+        "learning_rate": cfg.training.grpo.learning_rate,
+        "num_epochs": cfg.training.grpo.num_epochs,
+        "per_device_batch_size": cfg.training.grpo.per_device_batch_size,
+        "gradient_accumulation_steps": cfg.training.grpo.gradient_accumulation_steps,
+        "seed": cfg.project.seed,
+        "sglang_url": sglang_url,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="GRPO training")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--team", default=None, help="Train specific team only")
-    parser.add_argument("--no-ray", action="store_true", help="Disable Ray, train teams sequentially")
+    parser.add_argument("--ray", action="store_true", help="Multi-GPU parallel training via Ray")
     parser.add_argument("--small", action="store_true", help="Use small model (Qwen3-1.7B) instead of default 4B")
     args = parser.parse_args()
 
     cfg = load_config(config_path=args.config)
     set_seed(cfg)
 
-    use_ray = cfg.training.ray.get("enabled", True) and not args.no_ray
     model_name = cfg.model.small.name if args.small else cfg.model.large.name
 
     sglang_url = None
@@ -114,51 +134,36 @@ def main():
     team_configs = list(cfg.teams.types)
     simulator = TeamSimulator.load(teams_dir, team_configs)
 
+    mode = "Ray (multi-GPU)" if args.ray else "single-GPU (model loaded once, LoRA swapped per team)"
     console.print(f"Model: {model_name}")
     console.print(f"Method: GRPO with LoRA (r={cfg.training.lora.r})")
     console.print(f"Group size: {cfg.training.grpo.group_size}")
     console.print(f"Epochs: {cfg.training.grpo.num_epochs}")
-    console.print(f"Ray: {'enabled' if use_ray else 'disabled (sequential)'}")
+    console.print(f"Training mode: {mode}")
     console.print(f"Rollout generation: {'SGLang' if sglang_url else 'local model'}")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if args.team:
+        console.print(f"\n[bold]Training single team: {args.team}[/bold]")
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        team = simulator.teams[args.team]
+        results = {args.team: train_single_team(args.team, team, model_name, sglang_url, cfg, tokenizer)}
 
-    if use_ray and not args.team:
-        console.print("\n[bold]Distributing training across teams via Ray[/bold]")
-        config_dict = {
-            "model_name": model_name,
-            "base_output_dir": "outputs/grpo",
-            "lora_r": cfg.training.lora.r,
-            "lora_alpha": cfg.training.lora.alpha,
-            "lora_dropout": cfg.training.lora.dropout,
-            "group_size": cfg.training.grpo.group_size,
-            "learning_rate": cfg.training.grpo.learning_rate,
-            "num_epochs": cfg.training.grpo.num_epochs,
-            "per_device_batch_size": cfg.training.grpo.per_device_batch_size,
-            "gradient_accumulation_steps": cfg.training.grpo.gradient_accumulation_steps,
-            "seed": cfg.project.seed,
-            "sglang_url": sglang_url,
-        }
+    elif args.ray:
+        console.print("\n[bold]Multi-GPU training via Ray[/bold]")
+        config_dict = _build_config_dict(model_name, sglang_url, cfg)
         results = train_all_teams_ray(
             simulator.teams,
             config_dict,
             num_cpus=cfg.training.ray.num_cpus,
             num_gpus=cfg.training.ray.num_gpus,
         )
+
     else:
-        if args.team:
-            console.print(f"\n[bold]Training single team: {args.team}[/bold]")
-        teams_to_train = (
-            {args.team: simulator.teams[args.team]}
-            if args.team
-            else simulator.teams
-        )
-        results = {}
-        for name, team in teams_to_train.items():
-            result = train_single_team(name, team, model_name, sglang_url, cfg, tokenizer)
-            results[name] = result
+        console.print("\n[bold]Training all teams (base model loaded once, LoRA swapped per team)[/bold]")
+        config_dict = _build_config_dict(model_name, sglang_url, cfg)
+        results = train_all_teams(simulator.teams, config_dict)
 
     table = Table(title="Training Results")
     table.add_column("Team", style="cyan")

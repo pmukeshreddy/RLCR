@@ -559,7 +559,105 @@ class RLCRTrainer:
 
 
 # ---------------------------------------------------------------------------
-# Ray distribution
+# Single-GPU: load model once, swap LoRA per team
+# ---------------------------------------------------------------------------
+
+def train_all_teams(
+    teams: dict,
+    config_dict: dict,
+) -> dict[str, dict]:
+    """Train all teams on a single GPU. Loads the base model ONCE.
+
+    For each team: attach fresh LoRA → train → save adapter → unload LoRA.
+    Base model stays resident — zero redundant loads, minimal GPU churn.
+    """
+    model_name = config_dict["model_name"]
+    logger.info(f"Loading base model once: {model_name}")
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=dtype,
+        device_map="auto" if torch.cuda.is_available() else None,
+        trust_remote_code=True,
+    )
+
+    lora_target = config_dict.get("lora_target_modules", ["q_proj", "v_proj"])
+    sglang_url = config_dict.get("sglang_url")
+    team_names = list(teams.keys())
+
+    results = {}
+    for idx, team_name in enumerate(team_names):
+        team = teams[team_name]
+        logger.info(f"[{idx+1}/{len(team_names)}] Training team: {team_name}")
+
+        lora_cfg = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=config_dict.get("lora_r", 16),
+            lora_alpha=config_dict.get("lora_alpha", 32),
+            lora_dropout=config_dict.get("lora_dropout", 0.05),
+            target_modules=lora_target,
+        )
+        peft_model = get_peft_model(base_model, lora_cfg)
+
+        trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in peft_model.parameters())
+        logger.info(f"  LoRA params: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
+
+        train_dicts = [s.to_dict() for s in team.train_samples]
+        eval_dicts = [s.to_dict() for s in team.test_samples[:50]]
+
+        train_ds = build_training_dataset(
+            train_dicts, team_name, team.description, team.vote_history, tokenizer
+        )
+        eval_ds = build_training_dataset(
+            eval_dicts, team_name, team.description, team.vote_history, tokenizer
+        )
+
+        run_config = GRPORunConfig(
+            model_name=model_name,
+            output_dir=os.path.join(config_dict["base_output_dir"], team_name),
+            team_name=team_name,
+            team_description=team.description,
+            vote_history=team.vote_history,
+            group_size=config_dict.get("group_size", 8),
+            learning_rate=config_dict.get("learning_rate", 5e-6),
+            num_epochs=config_dict.get("num_epochs", 3),
+            per_device_batch_size=config_dict.get("per_device_batch_size", 2),
+            gradient_accumulation_steps=config_dict.get("gradient_accumulation_steps", 4),
+            seed=config_dict.get("seed", 42),
+            sglang_url=sglang_url,
+            sglang_concurrent=config_dict.get("sglang_concurrent", 16),
+        )
+
+        trainer = RLCRTrainer(run_config)
+        trainer.model = peft_model
+        trainer.tokenizer = tokenizer
+
+        try:
+            result = trainer._train_custom(train_ds, eval_ds)
+            results[team_name] = result
+            logger.success(f"Team {team_name} complete")
+        except Exception as e:
+            logger.error(f"Team {team_name} failed: {e}")
+            results[team_name] = {"error": str(e)}
+
+        # Detach LoRA, recover the clean base model for next team
+        base_model = peft_model.unload()
+        del peft_model, trainer
+        torch.cuda.empty_cache()
+
+    del base_model
+    torch.cuda.empty_cache()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Ray: multi-GPU parallel training
 # ---------------------------------------------------------------------------
 
 def train_team_worker(
@@ -615,20 +713,13 @@ def train_all_teams_ray(
     num_cpus: int = 4,
     num_gpus: int = 1,
 ) -> dict[str, dict]:
-    """Launch per-team GRPO training via Ray.
-
-    Each worker requests 1 full GPU. On multi-GPU (e.g., 4×A100), Ray runs
-    up to num_gpus teams in parallel. On single GPU, Ray queues teams
-    automatically — no OOM from concurrent model copies.
-    """
+    """Multi-GPU parallel training via Ray. Each worker gets 1 full GPU."""
     import ray
 
     if not ray.is_initialized():
         ray.init(num_cpus=num_cpus, num_gpus=num_gpus, ignore_reinit_error=True)
 
-    gpu_per_worker = 1
-
-    @ray.remote(num_gpus=gpu_per_worker)
+    @ray.remote(num_gpus=1)
     def _train_remote(team_name, team_desc, votes, train_s, eval_s, cfg):
         return train_team_worker(team_name, team_desc, votes, train_s, eval_s, cfg)
 

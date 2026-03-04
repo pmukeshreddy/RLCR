@@ -57,8 +57,9 @@ Greptile's team [documented their struggle](https://greptile.com): they tried 4 
 │             │              │  └───────┬────────┘  │  │
 │             │              │          │           │  │
 │             │              │  ┌───────▼────────┐  │  │
-│             │              │  │  Ray Workers   │  │  │
-│             │              │  │  (parallel)    │  │  │
+│             │              │  │ LoRA per team  │  │  │
+│             │              │  │ (swap, no      │  │  │
+│             │              │  │  model reload) │  │  │
 │             │              │  └────────────────┘  │  │
 │             │              └──────────┬───────────┘  │
 │             │                         │              │
@@ -116,9 +117,10 @@ python scripts/03_run_baseline.py
 # 4. Launch SGLang (used for fast rollout generation during training + eval)
 bash scripts/04_launch_sglang.sh
 
-# 5. Train GRPO policies per team (SGLang handles rollout generation,
-#    local model does the gradient forward pass)
-python scripts/05_grpo_train.py
+# 5. Train GRPO policies per team (base model loaded once, LoRA swapped per team)
+#    SGLang handles rollout generation, local model does the gradient pass
+python scripts/05_grpo_train.py            # single GPU (default)
+python scripts/05_grpo_train.py --ray      # multi-GPU via Ray
 
 # 6. Full evaluation with cold-start curves
 python scripts/06_evaluate.py
@@ -228,8 +230,9 @@ New comment → embed → cosine_sim(upvoted_store) - λ·cosine_sim(downvoted_s
 - **In-context learning**: The LLM can reason about *why* a comment matters to *this* team
 - **Exploration**: GRPO generates multiple scoring strategies per sample, keeps what works
 - **Group-relative normalization**: Learns from relative quality within batches, not absolute thresholds
-- **LoRA efficiency**: Per-team adapters are tiny (~0.1% of parameters)
+- **LoRA efficiency**: Per-team adapters are tiny (~0.1% of parameters). Base model is loaded once; LoRA is swapped per team with zero model reloads
 - **SGLang rollouts**: Generation during training is batched through SGLang's continuous batching engine — the real bottleneck in GRPO is `model.generate()`, and SGLang makes this 5-10x faster than sequential HuggingFace generation
+- **Multi-GPU scaling**: Pass `--ray` to distribute teams across GPUs in parallel
 
 ## Configuration
 
@@ -250,7 +253,7 @@ model:
     name: "Qwen/Qwen3-4B"     # Final numbers
   sglang:
     mem_fraction: 0.85          # GPU memory during eval (SGLang only)
-    mem_fraction_training: 0.40 # GPU memory during training (shares with LoRA model)
+    mem_fraction_training: 0.30 # GPU memory during training (shares with LoRA model)
 ```
 
 ## Hardware Requirements
@@ -262,7 +265,7 @@ model:
 | **Inference (SGLang)** | 4GB VRAM | 10GB VRAM |
 | **CPU fallback** | 16GB RAM (slow) | 32GB RAM (slow) |
 
-During training, SGLang runs at 40% GPU memory for fast rollout generation while the LoRA model uses the rest for the gradient forward pass. The embedding baseline runs on CPU in minutes. GRPO training takes 1-4 hours per team on a single GPU (faster with SGLang rollouts).
+During training, SGLang runs at 30% GPU memory for fast rollout generation while the LoRA model uses the rest for the gradient forward pass. The base model is loaded once and LoRA adapters are swapped per team — no redundant model reloads. The embedding baseline runs on CPU in minutes. GRPO training takes 1-4 hours for all teams on a single GPU (faster with SGLang rollouts).
 
 > **Model-agnostic:** The pipeline works with any HuggingFace causal LM.
 > To swap models, change `model.small.name` / `model.large.name` in `configs/default.yaml`.

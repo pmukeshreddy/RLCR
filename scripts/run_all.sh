@@ -5,9 +5,9 @@
 #
 # GPU lifecycle:
 #   Steps 1-3:  CPU only (data, teams, embeddings)
-#   Step 4:     Launch SGLang with reduced memory (0.40) for rollout generation
-#   Step 5:     GRPO training — SGLang does fast batched rollouts,
-#               local model does forward pass with gradients + backward
+#   Step 4:     Launch SGLang with reduced memory (0.30) for rollout generation
+#   Step 5:     GRPO training — base model loaded ONCE, LoRA swapped per team.
+#               SGLang does fast batched rollouts, local model does gradient pass.
 #   Kill SGLang, relaunch with full memory (0.85) for fast eval
 #   Step 6:     Evaluation via SGLang
 #   Step 7:     Scale comparison (SGLang managed internally)
@@ -188,7 +188,7 @@ if [ "$NO_SGLANG" = false ]; then
     echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
 fi
 
-run_step 5 "GRPO Training (SGLang rollouts + local gradient pass)" \
+run_step 5 "GRPO Training (load once, swap LoRA per team)" \
     "python scripts/05_grpo_train.py $TRAIN_ARGS"
 
 # =============================================
