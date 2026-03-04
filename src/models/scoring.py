@@ -121,9 +121,12 @@ def format_prompt_text(
         diff, comment, team_name, team_description, vote_history, max_context_votes
     )
     if tokenizer and hasattr(tokenizer, "apply_chat_template"):
-        return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        try:
+            return tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except (ImportError, Exception):
+            pass
     parts = []
     for msg in messages:
         role = msg["role"].upper()
@@ -278,9 +281,14 @@ class ReviewScorer:
         messages = format_scoring_prompt(
             diff, comment, team_name, team_description, vote_history
         )
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        try:
+            text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except (ImportError, Exception):
+            text = format_prompt_text(
+                diff, comment, team_name, team_description, vote_history
+            )
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=2048)
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 

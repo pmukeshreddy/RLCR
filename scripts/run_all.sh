@@ -32,6 +32,7 @@ BASELINE_ONLY=false
 QUICK=false
 CONFIG="configs/default.yaml"
 SGLANG_PID=""
+SGLANG_PORT=30000
 
 for arg in "$@"; do
     case $arg in
@@ -42,14 +43,24 @@ for arg in "$@"; do
     esac
 done
 
-cleanup() {
-    if [ -n "$SGLANG_PID" ] && kill -0 "$SGLANG_PID" 2>/dev/null; then
-        echo ""
-        echo "[*] Cleaning up SGLang (PID $SGLANG_PID)..."
-        kill -TERM -- -"$SGLANG_PID" 2>/dev/null || kill "$SGLANG_PID" 2>/dev/null || true
-        wait "$SGLANG_PID" 2>/dev/null || true
-        echo "[✓] SGLang stopped"
+# Kill SGLang by port — works even if we lost the PID (subshell, etc.)
+kill_sglang_on_port() {
+    local port="${1:-$SGLANG_PORT}"
+    local pids
+    pids=$(lsof -ti :"$port" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "[*] Killing SGLang processes on port $port (PIDs: $(echo $pids | tr '\n' ' '))..."
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+        sleep 3
+        echo "[✓] GPU memory freed"
     fi
+    SGLANG_PID=""
+}
+
+cleanup() {
+    echo ""
+    echo "[*] Cleaning up..."
+    kill_sglang_on_port "$SGLANG_PORT"
 }
 trap cleanup EXIT INT TERM
 
@@ -89,15 +100,11 @@ run_step() {
     fi
 }
 
+# Launch SGLang directly (NOT through run_step, to keep PID in parent shell)
 launch_sglang() {
     local model="${1:-Qwen/Qwen3-4B}"
-    local port="${2:-30000}"
+    local port="${2:-$SGLANG_PORT}"
     local mem_frac="${3:-0.85}"
-
-    if curl -s "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
-        echo "[✓] SGLang already healthy on port $port"
-        return 0
-    fi
 
     echo "[*] Launching SGLang: $model on port $port (mem_fraction=$mem_frac)"
     python -m sglang.launch_server \
@@ -133,17 +140,6 @@ launch_sglang() {
     return 0
 }
 
-kill_sglang() {
-    if [ -n "$SGLANG_PID" ] && kill -0 "$SGLANG_PID" 2>/dev/null; then
-        echo "[*] Stopping SGLang (PID $SGLANG_PID) to free GPU..."
-        kill "$SGLANG_PID" 2>/dev/null || true
-        wait "$SGLANG_PID" 2>/dev/null || true
-        SGLANG_PID=""
-        sleep 3
-        echo "[✓] GPU memory freed"
-    fi
-}
-
 # =============================================
 # Steps 1-3: CPU only (data + embeddings)
 # =============================================
@@ -170,6 +166,9 @@ fi
 #
 # SGLang runs with reduced memory (0.40) so the local training
 # model can coexist on the same GPU for the gradient forward pass.
+#
+# NOTE: launch_sglang and kill_sglang_on_port are called DIRECTLY
+# (not through run_step) so SGLANG_PID stays in the parent shell.
 # =============================================
 
 TRAIN_ARGS="--config $CONFIG"
@@ -180,24 +179,34 @@ if [ "$QUICK" = true ]; then
 fi
 
 if [ "$NO_SGLANG" = false ]; then
-    run_step 4 "Launch SGLang for Rollout Generation" \
-        "launch_sglang $SGLANG_MODEL 30000 0.40"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Step 4: Launch SGLang for Rollout Generation"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "[$(date +%H:%M:%S)] Starting..."
+    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.40
+    echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
 fi
 
 run_step 5 "GRPO Training (SGLang rollouts + local gradient pass)" \
     "python scripts/05_grpo_train.py $TRAIN_ARGS"
 
 # =============================================
-# Restart SGLang with full memory for eval (faster inference)
+# Kill SGLang (0.40 mem), relaunch with full memory (0.85) for eval
 # =============================================
 
 EVAL_ARGS="--config $CONFIG"
 if [ "$NO_SGLANG" = true ]; then
     EVAL_ARGS="$EVAL_ARGS --no-sglang"
 else
-    kill_sglang
-    run_step "4b" "Restart SGLang with full memory for evaluation" \
-        "launch_sglang $SGLANG_MODEL 30000 0.85"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Step 4b: Restart SGLang with full memory for evaluation"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "[$(date +%H:%M:%S)] Starting..."
+    kill_sglang_on_port "$SGLANG_PORT"
+    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.85
+    echo "[$(date +%H:%M:%S)] ✓ Step 4b complete"
 fi
 
 run_step 6 "Evaluation" \
@@ -220,7 +229,7 @@ fi
 # Step 8: Visualizations (CPU only)
 # =============================================
 
-kill_sglang
+kill_sglang_on_port "$SGLANG_PORT"
 
 run_step 8 "Visualizations" \
     "python scripts/08_visualize.py --config $CONFIG"
