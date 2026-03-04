@@ -184,7 +184,7 @@ if [ "$NO_SGLANG" = false ]; then
     echo " Step 4: Launch SGLang for Rollout Generation"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$(date +%H:%M:%S)] Starting..."
-    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.40
+    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.30
     echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
 fi
 

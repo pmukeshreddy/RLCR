@@ -312,7 +312,7 @@ class RLCRTrainer:
             format_weight=0.2,
         )
 
-        training_args = GRPOConfig(
+        trl_kwargs = dict(
             output_dir=self.config.output_dir,
             num_train_epochs=self.config.num_epochs,
             per_device_train_batch_size=self.config.per_device_batch_size,
@@ -322,8 +322,6 @@ class RLCRTrainer:
             max_grad_norm=self.config.max_grad_norm,
             logging_steps=self.config.logging_steps,
             save_steps=self.config.save_steps,
-            eval_steps=self.config.eval_steps if eval_dataset else None,
-            evaluation_strategy="steps" if eval_dataset else "no",
             num_generations=self.config.group_size,
             max_completion_length=self.config.max_completion_length,
             max_prompt_length=self.config.max_prompt_length,
@@ -333,6 +331,15 @@ class RLCRTrainer:
             report_to="none",
             remove_unused_columns=False,
         )
+        if eval_dataset:
+            trl_kwargs["eval_steps"] = self.config.eval_steps
+            import inspect
+            sig = inspect.signature(GRPOConfig.__init__)
+            if "eval_strategy" in sig.parameters:
+                trl_kwargs["eval_strategy"] = "steps"
+            else:
+                trl_kwargs["evaluation_strategy"] = "steps"
+        training_args = GRPOConfig(**trl_kwargs)
 
         self.trainer = GRPOTrainer(
             model=self.model,
@@ -608,13 +615,20 @@ def train_all_teams_ray(
     num_cpus: int = 4,
     num_gpus: int = 1,
 ) -> dict[str, dict]:
-    """Launch parallel per-team GRPO training via Ray."""
+    """Launch per-team GRPO training via Ray.
+
+    Each worker requests 1 full GPU. On multi-GPU (e.g., 4×A100), Ray runs
+    up to num_gpus teams in parallel. On single GPU, Ray queues teams
+    automatically — no OOM from concurrent model copies.
+    """
     import ray
 
     if not ray.is_initialized():
         ray.init(num_cpus=num_cpus, num_gpus=num_gpus, ignore_reinit_error=True)
 
-    @ray.remote(num_gpus=min(1, num_gpus / max(len(teams), 1)))
+    gpu_per_worker = 1
+
+    @ray.remote(num_gpus=gpu_per_worker)
     def _train_remote(team_name, team_desc, votes, train_s, eval_s, cfg):
         return train_team_worker(team_name, team_desc, votes, train_s, eval_s, cfg)
 
