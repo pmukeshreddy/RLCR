@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data & outputs (large files)
+data/cache/
+data/raw/
+data/processed/
+outputs/
+results/
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Models & checkpoints
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# Logging
+wandb/
+*.log
+
+# FAISS indices
+*.faiss
+
+# Pickle caches
+*.pkl

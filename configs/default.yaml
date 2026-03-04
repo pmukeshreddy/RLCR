@@ -1,0 +1,196 @@
+project:
+  name: "RLCR"
+  description: "Reinforcement Learning for Code Review Filtering"
+  seed: 42
+  device: "auto"  # auto, cuda, cpu
+
+data:
+  dataset_name: "microsoft/CodeReviewer"
+  subset: "cls"
+  max_tokens: 512
+  cache_dir: "./data/cache"
+  raw_dir: "./data/raw"
+  processed_dir: "./data/processed"
+  min_diff_length: 10
+  max_diff_length: 2048
+  min_comment_length: 5
+
+teams:
+  n_teams: 5
+  types:
+    - name: "security"
+      description: "Security-focused team that prioritizes vulnerability detection"
+      keywords:
+        - "vulnerability"
+        - "injection"
+        - "XSS"
+        - "CSRF"
+        - "auth"
+        - "sanitize"
+        - "escape"
+        - "permission"
+        - "access control"
+        - "encryption"
+        - "secret"
+        - "credential"
+        - "SQL injection"
+        - "buffer overflow"
+        - "unsafe"
+    - name: "style"
+      description: "Style-obsessed team that enforces coding conventions"
+      keywords:
+        - "naming"
+        - "convention"
+        - "format"
+        - "indent"
+        - "camelCase"
+        - "snake_case"
+        - "consistent"
+        - "style"
+        - "lint"
+        - "whitespace"
+        - "spacing"
+        - "readable"
+        - "PEP"
+        - "eslint"
+        - "prettier"
+    - name: "performance"
+      description: "Performance-focused team obsessed with efficiency"
+      keywords:
+        - "performance"
+        - "O(n)"
+        - "complexity"
+        - "cache"
+        - "optimize"
+        - "efficient"
+        - "memory"
+        - "latency"
+        - "bottleneck"
+        - "slow"
+        - "loop"
+        - "allocation"
+        - "profil"
+        - "benchmark"
+        - "async"
+    - name: "pragmatic"
+      description: "Pragmatic team that values quick, actionable feedback"
+      keywords:
+        - "TODO"
+        - "FIXME"
+        - "hack"
+        - "workaround"
+        - "quick"
+        - "simple"
+        - "just"
+        - "nit"
+        - "minor"
+        - "typo"
+        - "unused"
+        - "dead code"
+        - "remove"
+        - "delete"
+    - name: "thorough"
+      description: "Thorough team that provides detailed, educational reviews"
+      keywords:
+        - "suggest"
+        - "consider"
+        - "alternative"
+        - "pattern"
+        - "design"
+        - "architecture"
+        - "refactor"
+        - "abstraction"
+        - "principle"
+        - "maintainab"
+        - "testab"
+        - "documentation"
+        - "example"
+        - "best practice"
+  train_samples_range: [20, 50]
+  min_test_samples: 200
+  fallback_random_assignment: true
+
+baseline:
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  embedding_dim: 384
+  threshold_range: [0.05, 0.95]
+  threshold_steps: 50
+  faiss_index_type: "flatip"
+  upvote_weight: 1.0
+  downvote_weight: 0.8
+  min_votes_for_prediction: 3
+  batch_size: 256
+
+model:
+  small:
+    name: "Qwen/Qwen3-1.7B"
+    max_new_tokens: 256
+    temperature: 0.7
+    top_p: 0.9
+  large:
+    name: "Qwen/Qwen3-4B"
+    max_new_tokens: 256
+    temperature: 0.7
+    top_p: 0.9
+  sglang:
+    enabled: true
+    host: "127.0.0.1"
+    port: 30000
+    mem_fraction: 0.85
+    mem_fraction_training: 0.40
+
+training:
+  method: "grpo"
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+  grpo:
+    group_size: 8
+    learning_rate: 5.0e-6
+    num_epochs: 3
+    per_device_batch_size: 2
+    gradient_accumulation_steps: 4
+    warmup_ratio: 0.1
+    kl_coef: 0.04
+    clip_range: 0.2
+    max_grad_norm: 0.5
+    logging_steps: 10
+    save_steps: 100
+    eval_steps: 50
+  ray:
+    enabled: true
+    num_cpus: 4
+    num_gpus: 1
+    num_workers: 1
+
+evaluation:
+  cold_start_steps: [0, 5, 10, 20, 50, 100]
+  n_seeds: 3
+  metrics:
+    - "accuracy"
+    - "precision"
+    - "recall"
+    - "f1"
+    - "auroc"
+    - "action_rate"
+  generalization:
+    train_pattern: "style"
+    test_pattern: "thorough"
+
+visualization:
+  output_dir: "./results/figures"
+  dpi: 300
+  style: "seaborn-v0_8-whitegrid"
+  figsize: [10, 6]
+  colors:
+    rl: "#2196F3"
+    baseline: "#FF5722"
+    random: "#9E9E9E"
+  team_colors:
+    security: "#E53935"
+    style: "#8E24AA"
+    performance: "#FF8F00"
+    pragmatic: "#43A047"
+    thorough: "#1E88E5"
