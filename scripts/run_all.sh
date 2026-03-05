@@ -105,8 +105,13 @@ launch_sglang() {
     local model="${1:-Qwen/Qwen3-4B}"
     local port="${2:-$SGLANG_PORT}"
     local mem_frac="${3:-0.85}"
+    local enable_lora="${4:-false}"
 
-    echo "[*] Launching SGLang: $model on port $port (mem_fraction=$mem_frac)"
+    echo "[*] Launching SGLang: $model on port $port (mem_fraction=$mem_frac, lora=$enable_lora)"
+    local lora_flags=""
+    if [ "$enable_lora" = true ]; then
+        lora_flags="--enable-lora --max-lora-rank 32 --lora-target-modules all --max-loras-per-batch 2"
+    fi
     python -m sglang.launch_server \
         --model-path "$model" \
         --host 127.0.0.1 \
@@ -115,6 +120,7 @@ launch_sglang() {
         --trust-remote-code \
         --log-level warning \
         --enable-flashinfer \
+        $lora_flags \
         > "$LOG_DIR/sglang_${port}.log" 2>&1 &
     SGLANG_PID=$!
 
@@ -198,7 +204,7 @@ if [ "$NO_SGLANG" = false ]; then
     echo " Step 4: Launch SGLang for Rollout Generation"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$(date +%H:%M:%S)] Starting..."
-    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.45
+    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.45 true
     echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
 fi
 

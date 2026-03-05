@@ -59,8 +59,8 @@ class GRPORunConfig:
     team_name: str
     team_description: str
     vote_history: list[dict]
-    lora_r: int = 16
-    lora_alpha: int = 32
+    lora_r: int = 32
+    lora_alpha: int = 64
     lora_dropout: float = 0.05
     lora_target_modules: list[str] | None = None
     group_size: int = 8
@@ -134,6 +134,47 @@ def _probe_sglang(url: str) -> bool:
             continue
     logger.warning(f"SGLang not reachable at {url} (tried /health and /v1/models)")
     return False
+
+
+_SGLANG_ADAPTER_NAME = "current_policy"
+
+
+def _sync_lora_to_sglang(model, sglang_url: str, adapter_dir: str) -> bool:
+    """Save LoRA adapter to disk and hot-reload into SGLang.
+
+    Implements veRL-style weight sync: push current policy weights to the
+    inference engine before every rollout so generation is on-policy.
+    Flow: unload old adapter → save new weights → load new adapter.
+    """
+    import requests
+
+    adapter_path = Path(adapter_dir)
+    adapter_path.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(str(adapter_path))
+
+    try:
+        requests.post(
+            f"{sglang_url}/unload_lora_adapter",
+            json={"lora_name": _SGLANG_ADAPTER_NAME},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+    try:
+        resp = requests.post(
+            f"{sglang_url}/load_lora_adapter",
+            json={
+                "lora_name": _SGLANG_ADAPTER_NAME,
+                "lora_path": str(adapter_path.resolve()),
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        logger.warning(f"LoRA sync to SGLang failed: {e}")
+        return False
 
 
 def _sglang_generate_one(args: tuple) -> str:
@@ -438,7 +479,7 @@ class RLCRTrainer:
           good actions more aggressively than it decreases bad ones.
         """
         from torch.optim import AdamW
-        from transformers import get_linear_schedule_with_warmup
+        from transformers import get_constant_schedule_with_warmup
 
         device = next(self.model.parameters()).device
         reward_fn = CodeReviewReward(
@@ -453,16 +494,24 @@ class RLCRTrainer:
 
         batches_per_epoch = max(len(train_dataset) // self.config.per_device_batch_size, 1)
         total_optim_steps = batches_per_epoch * self.config.num_epochs * self.config.ppo_epochs
-        scheduler = get_linear_schedule_with_warmup(
+        scheduler = get_constant_schedule_with_warmup(
             optimizer,
             num_warmup_steps=int(total_optim_steps * self.config.warmup_ratio),
-            num_training_steps=total_optim_steps,
         )
 
         use_sglang = bool(self.config.sglang_url and _probe_sglang(self.config.sglang_url))
+        adapter_sync_dir = str(Path(self.config.output_dir) / "_sglang_sync")
         if use_sglang:
-            logger.info(f"Rollout via SGLang at {self.config.sglang_url} (fast, off-policy)")
-        else:
+            synced = _sync_lora_to_sglang(self.model, self.config.sglang_url, adapter_sync_dir)
+            if synced:
+                logger.info(
+                    f"Rollout via SGLang at {self.config.sglang_url} "
+                    f"(on-policy with LoRA sync every batch)"
+                )
+            else:
+                logger.warning("Initial LoRA sync failed — falling back to local generation")
+                use_sglang = False
+        if not use_sglang:
             logger.info("Rollout via local LoRA model (on-policy, slower)")
 
         eps_low = self.config.clip_ratio_low
@@ -497,13 +546,16 @@ class RLCRTrainer:
                 prompts = [b["prompt"] for b in batch]
                 labels = [b["label"] for b in batch]
 
-                # Phase 1: Generate completions (no gradients)
+                # Phase 1: Sync LoRA → SGLang, then generate (on-policy)
                 if use_sglang:
+                    _sync_lora_to_sglang(
+                        self.model, self.config.sglang_url, adapter_sync_dir,
+                    )
                     all_completions, all_prompt_ids, all_gen_ids = rollout_sglang(
                         prompts=prompts,
                         group_size=self.config.group_size,
                         sglang_url=self.config.sglang_url,
-                        model_name=self.config.model_name,
+                        model_name=_SGLANG_ADAPTER_NAME,
                         tokenizer=self.tokenizer,
                         max_tokens=self.config.max_completion_length,
                         max_workers=self.config.sglang_concurrent,
@@ -521,9 +573,9 @@ class RLCRTrainer:
                     )
                 torch.cuda.empty_cache()
 
-                if global_step == 0:
-                    sample = all_completions[0][0][0]["content"][:200]
-                    logger.info(f"  Sample completion (first): {sample!r}")
+                if batch_start == 0:
+                    sample = all_completions[0][0][0]["content"][:300]
+                    logger.info(f"  [Epoch {epoch}] Sample completion: {sample!r}")
 
                 # Phase 2: Rewards + dynamic sampling filter
                 batch_rewards = []
@@ -766,8 +818,8 @@ def train_all_teams(
 
         lora_cfg = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            r=config_dict.get("lora_r", 16),
-            lora_alpha=config_dict.get("lora_alpha", 32),
+            r=config_dict.get("lora_r", 32),
+            lora_alpha=config_dict.get("lora_alpha", 64),
             lora_dropout=config_dict.get("lora_dropout", 0.05),
             target_modules=lora_target,
         )

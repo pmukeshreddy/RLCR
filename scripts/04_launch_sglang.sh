@@ -22,12 +22,14 @@ cd "$PROJECT_DIR"
 
 MODEL="${1:-Qwen/Qwen3-4B}"
 PORT="${2:-30000}"
+ENABLE_LORA="${3:-false}"
 
 echo "============================================="
 echo " Step 4: SGLang Server"
 echo "============================================="
 echo " Model: $MODEL"
 echo " Port:  $PORT"
+echo " LoRA:  $ENABLE_LORA"
 echo "============================================="
 
 # Check if already healthy
@@ -42,15 +44,18 @@ import sys
 sys.path.insert(0, '.')
 from src.models.sglang_server import SGLangServer
 
-server = SGLangServer('${MODEL}', port=${PORT})
+server = SGLangServer(
+    '${MODEL}',
+    port=${PORT},
+    enable_lora='${ENABLE_LORA}' == 'true',
+    max_lora_rank=32,
+)
 if server.start():
     print()
     print('[✓] SGLang ready. Server running as subprocess.')
     print(f'    PID: {server.process.pid}')
     print(f'    URL: {server.url}')
     print(f'    To stop: kill {server.process.pid}')
-    # Don't call server.stop() — leave it running for eval steps
-    # atexit handler will clean up if the parent shell dies
 else:
     print('[✗] SGLang failed to start.')
     print('    Check results/logs/sglang_${PORT}.log for details.')

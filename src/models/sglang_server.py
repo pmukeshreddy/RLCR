@@ -41,6 +41,8 @@ class SGLangServer:
         mem_fraction: float = 0.85,
         max_wait: int = 300,
         log_dir: str = "results/logs",
+        enable_lora: bool = False,
+        max_lora_rank: int = 32,
     ):
         self.model_name = model_name
         self.host = host
@@ -48,6 +50,8 @@ class SGLangServer:
         self.mem_fraction = mem_fraction
         self.max_wait = max_wait
         self.log_dir = Path(log_dir)
+        self.enable_lora = enable_lora
+        self.max_lora_rank = max_lora_rank
         self.process: subprocess.Popen | None = None
         self._registered_cleanup = False
 
@@ -95,6 +99,13 @@ class SGLangServer:
             "--trust-remote-code",
             "--log-level", "warning",
         ]
+        if self.enable_lora:
+            cmd += [
+                "--enable-lora",
+                "--max-lora-rank", str(self.max_lora_rank),
+                "--lora-target-modules", "all",
+                "--max-loras-per-batch", "2",
+            ]
 
         logger.info(f"Starting SGLang: {self.model_name} on {self.url}")
         logger.info(f"  Log: {log_file}")
