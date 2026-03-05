@@ -7,8 +7,11 @@ Teams map directly to the comment_type field from the dataset:
   - pragmatic: nitpicks, quick fixes, short comments
   - thorough: suggestions, refactors, questions, detailed reviews
 
-This uses REAL comment categories from human reviewers, not synthetic
-keyword matching.
+Negatives are CROSS-TEAM positives: a style comment is a negative for
+the security team. This creates hard negatives that share the same
+"real review comment" distribution but differ in topic relevance.
+The dataset's is_negative=True samples (clean code, no issues) are
+too semantically distinct and make the filtering task trivial.
 """
 
 from __future__ import annotations
@@ -86,27 +89,25 @@ class TeamSimulator:
         samples: list[CodeReviewSample],
         train_range: tuple[int, int] = (20, 50),
         min_test: int = 200,
-        fallback_random: bool = True,
-        target_positive_rate: float = 0.6,
+        target_positive_rate: float = 0.5,
+        **_kwargs,
     ) -> dict[str, Team]:
-        """Assign samples to teams with balanced label distribution.
+        """Assign samples to teams using cross-team negatives.
 
-        1. Route by comment_type (positive samples get meaningful types).
-        2. Collect ALL label=0 samples into a shared negative pool.
-        3. Distribute negatives across teams to hit target_positive_rate.
-
-        Without step 2-3, most teams would be ~100% positive (comment_type
-        only exists on label=1 samples), making the filtering task trivial.
+        1. Route real review comments (label=1) to teams by comment_type.
+        2. For each team, negatives = comments from OTHER teams (relabeled 0).
+           These are hard negatives: real review comments, but wrong topic.
+        3. Discard dataset-level negatives (is_negative=True) since they're
+           too semantically distinct and make the task trivial.
         """
         logger.info(f"Assigning {len(samples)} samples to {len(self.teams)} teams")
 
         team_positives: dict[str, list[CodeReviewSample]] = defaultdict(list)
-        negative_pool: list[CodeReviewSample] = []
-        unassigned_pos: list[CodeReviewSample] = []
+        n_dataset_negatives = 0
 
         for sample in samples:
             if sample.label == 0:
-                negative_pool.append(sample)
+                n_dataset_negatives += 1
                 continue
 
             comment_type = getattr(sample, "comment_type", None) or ""
@@ -118,26 +119,20 @@ class TeamSimulator:
                 team_name = self._keyword_fallback(sample)
                 if team_name:
                     team_positives[team_name].append(sample)
-                else:
-                    unassigned_pos.append(sample)
-
-        if unassigned_pos:
-            self.rng.shuffle(unassigned_pos)
-            team_names = list(self.teams.keys())
-            for i, sample in enumerate(unassigned_pos):
-                team_positives[team_names[i % len(team_names)]].append(sample)
 
         logger.info(
-            f"  Positive pool: {sum(len(v) for v in team_positives.values())} "
+            f"  Routed {sum(len(v) for v in team_positives.values())} real comments "
             f"across {len(team_positives)} teams"
         )
-        logger.info(f"  Negative pool: {len(negative_pool)} samples to distribute")
-
-        team_assignments = self._balance_labels(
-            team_positives, negative_pool, target_positive_rate
+        logger.info(
+            f"  Discarded {n_dataset_negatives} dataset-level negatives "
+            f"(too easy — semantically distinct from real comments)"
         )
 
-        self._rebalance_if_needed(team_assignments, min_test)
+        team_assignments = self._build_cross_team_negatives(
+            team_positives, target_positive_rate
+        )
+
         self._create_splits(team_assignments, train_range, min_test)
         self._build_vote_histories()
 
@@ -150,19 +145,21 @@ class TeamSimulator:
 
         return self.teams
 
-    def _balance_labels(
+    def _build_cross_team_negatives(
         self,
         team_positives: dict[str, list[CodeReviewSample]],
-        negative_pool: list[CodeReviewSample],
         target_positive_rate: float,
     ) -> dict[str, list[CodeReviewSample]]:
-        """Distribute negatives across teams to achieve target label balance.
+        """Create hard negatives from other teams' positive comments.
 
-        For each team with N positives, adds N * (1 - rate) / rate negatives
-        so the final ratio is approximately target_positive_rate.
+        For each team, samples from ALL other teams become negatives
+        (relabeled to label=0). A "style" comment becomes a negative
+        for "security" because it's a real review comment but not
+        relevant to the security team's focus.
+
+        This makes the task genuinely hard: the model must distinguish
+        topic relevance, not just "is this a real review comment?"
         """
-        self.rng.shuffle(negative_pool)
-        neg_idx = 0
         assignments: dict[str, list[CodeReviewSample]] = {}
 
         for team_name in self.teams:
@@ -173,11 +170,28 @@ class TeamSimulator:
                 continue
 
             n_neg_needed = int(n_pos * (1 - target_positive_rate) / target_positive_rate)
-            n_neg_available = len(negative_pool) - neg_idx
-            n_neg = min(n_neg_needed, n_neg_available)
 
-            negatives = negative_pool[neg_idx:neg_idx + n_neg]
-            neg_idx += n_neg
+            other_pool: list[CodeReviewSample] = []
+            for other_name, other_samples in team_positives.items():
+                if other_name == team_name:
+                    continue
+                other_pool.extend(other_samples)
+
+            self.rng.shuffle(other_pool)
+            n_neg = min(n_neg_needed, len(other_pool))
+
+            negatives = []
+            for s in other_pool[:n_neg]:
+                neg = CodeReviewSample(
+                    diff=s.diff,
+                    comment=s.comment,
+                    label=0,
+                    diff_tokens=s.diff_tokens,
+                    comment_tokens=s.comment_tokens,
+                    comment_type=s.comment_type,
+                    quality_score=s.quality_score,
+                )
+                negatives.append(neg)
 
             combined = positives + negatives
             self.rng.shuffle(combined)
@@ -185,13 +199,9 @@ class TeamSimulator:
 
             actual_rate = n_pos / len(combined) if combined else 0
             logger.info(
-                f"  {team_name}: {n_pos} pos + {n_neg} neg "
+                f"  {team_name}: {n_pos} pos + {n_neg} cross-team neg "
                 f"= {len(combined)} total (positive_rate={actual_rate:.2f})"
             )
-
-        remaining = len(negative_pool) - neg_idx
-        if remaining > 0:
-            logger.info(f"  {remaining} negatives unused (pool exhausted target)")
 
         return assignments
 
@@ -209,27 +219,6 @@ class TeamSimulator:
                 best_score = score
                 best_team = name
         return best_team
-
-    def _rebalance_if_needed(
-        self,
-        assignments: dict[str, list[CodeReviewSample]],
-        min_test: int,
-    ):
-        """Redistribute samples from over-represented teams to under-represented ones."""
-        while True:
-            sizes = {k: len(v) for k, v in assignments.items()}
-            min_team = min(sizes, key=sizes.get)
-            max_team = max(sizes, key=sizes.get)
-            if sizes[min_team] >= min_test + 20:
-                break
-            if sizes[max_team] <= min_test + 50:
-                break
-            n_move = min(50, (sizes[max_team] - sizes[min_team]) // 2)
-            if n_move <= 0:
-                break
-            moved = assignments[max_team][-n_move:]
-            assignments[max_team] = assignments[max_team][:-n_move]
-            assignments[min_team].extend(moved)
 
     def _create_splits(
         self,
@@ -272,9 +261,8 @@ class TeamSimulator:
     def _build_vote_histories(self):
         """Build vote history from training labels.
 
-        For real data, label=1 means the reviewer's comment led to a code change
-        (addressed = upvote), label=0 means the code was clean / no change needed
-        (downvote for surfacing unnecessary comments).
+        label=1: comment is relevant to this team (upvote = surface it)
+        label=0: comment is from another team, not relevant (downvote = filter it)
         """
         for team in self.teams.values():
             team.vote_history = []
