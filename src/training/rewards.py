@@ -85,8 +85,8 @@ class CodeReviewReward:
     def __init__(
         self,
         overlong_penalty: float = 1.0,
-        overlong_buffer_len: int = 16,
-        max_completion_length: int = 64,
+        overlong_buffer_len: int = 32,
+        max_completion_length: int = 128,
     ):
         self.overlong_penalty = overlong_penalty
         self.overlong_buffer_len = overlong_buffer_len

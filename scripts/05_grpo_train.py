@@ -81,7 +81,7 @@ def train_single_team(team_name: str, team, model_name: str, sglang_url: str | N
         dynamic_sampling=dapo.dynamic_sampling,
         overlong_penalty=dapo.overlong_penalty,
         overlong_buffer_len=dapo.overlong_buffer_len,
-        max_completion_length=getattr(dapo, "max_completion_length", 64),
+        max_completion_length=getattr(dapo, "max_completion_length", 128),
         max_grad_norm=dapo.max_grad_norm,
         logging_steps=dapo.logging_steps,
         save_steps=dapo.save_steps,
@@ -115,7 +115,7 @@ def _build_config_dict(model_name: str, sglang_url: str | None, cfg) -> dict:
         "dynamic_sampling": dapo.dynamic_sampling,
         "overlong_penalty": dapo.overlong_penalty,
         "overlong_buffer_len": dapo.overlong_buffer_len,
-        "max_completion_length": getattr(dapo, "max_completion_length", 64),
+        "max_completion_length": getattr(dapo, "max_completion_length", 128),
         "seed": cfg.project.seed,
         "sglang_url": sglang_url,
     }

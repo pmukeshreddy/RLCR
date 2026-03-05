@@ -74,12 +74,12 @@ class GRPORunConfig:
     clip_ratio_high: float = 0.28
     dynamic_sampling: bool = True
     overlong_penalty: float = 1.0
-    overlong_buffer_len: int = 16
+    overlong_buffer_len: int = 32
     max_grad_norm: float = 0.5
     logging_steps: int = 5
     save_steps: int = 50
     eval_steps: int = 25
-    max_completion_length: int = 64
+    max_completion_length: int = 128
     max_prompt_length: int = 1024
     seed: int = 42
     sglang_url: str | None = None
@@ -855,8 +855,8 @@ def train_all_teams(
             clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
             dynamic_sampling=config_dict.get("dynamic_sampling", True),
             overlong_penalty=config_dict.get("overlong_penalty", 1.0),
-            overlong_buffer_len=config_dict.get("overlong_buffer_len", 16),
-            max_completion_length=config_dict.get("max_completion_length", 64),
+            overlong_buffer_len=config_dict.get("overlong_buffer_len", 32),
+            max_completion_length=config_dict.get("max_completion_length", 128),
             seed=config_dict.get("seed", 42),
             sglang_url=sglang_url,
             sglang_concurrent=config_dict.get("sglang_concurrent", 16),
@@ -919,8 +919,8 @@ def train_team_worker(
         clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
         dynamic_sampling=config_dict.get("dynamic_sampling", True),
         overlong_penalty=config_dict.get("overlong_penalty", 1.0),
-        overlong_buffer_len=config_dict.get("overlong_buffer_len", 16),
-        max_completion_length=config_dict.get("max_completion_length", 64),
+        overlong_buffer_len=config_dict.get("overlong_buffer_len", 32),
+        max_completion_length=config_dict.get("max_completion_length", 128),
         seed=config_dict.get("seed", 42),
         sglang_url=config_dict.get("sglang_url"),
         sglang_concurrent=config_dict.get("sglang_concurrent", 32),

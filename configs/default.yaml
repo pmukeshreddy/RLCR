@@ -157,8 +157,8 @@ training:
     clip_ratio_high: 0.28
     dynamic_sampling: true
     overlong_penalty: 1.0
-    overlong_buffer_len: 16
-    max_completion_length: 64
+    overlong_buffer_len: 32
+    max_completion_length: 128
     max_grad_norm: 0.5
     logging_steps: 5
     save_steps: 50
