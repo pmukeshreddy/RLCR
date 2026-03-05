@@ -123,7 +123,7 @@ def main():
         for team_name, team in simulator.teams.items():
             console.print(f"\n[cyan]Evaluating RL: {team_name}[/cyan]")
 
-            test_subset = team.test_samples[:200]
+            test_subset = team.test_samples[:50]
 
             cold_start.evaluate_rl_model(
                 scorer=scorer,
@@ -169,7 +169,7 @@ def main():
                 train_description=simulator.teams[train_team].description,
                 test_description=simulator.teams[test_team].description,
                 train_samples=simulator.teams[train_team].train_samples,
-                test_samples=simulator.teams[test_team].test_samples[:200],
+                test_samples=simulator.teams[test_team].test_samples[:50],
                 n_seeds=cfg.evaluation.n_seeds,
                 base_seed=cfg.project.seed,
             )
