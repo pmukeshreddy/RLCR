@@ -51,8 +51,13 @@ def eval_filter_cold_start(
     steps: list[int],
     n_seeds: int = 3,
     base_seed: int = 42,
+    pass_diffs: bool = False,
 ) -> dict[int, dict]:
-    """Evaluate an embedding filter at each cold-start step."""
+    """Evaluate an embedding filter at each cold-start step.
+
+    When pass_diffs=True, diffs are included in vote dicts and predict calls
+    (required for DistilledFilter whose model was trained on [team] diff [SEP] comment).
+    """
     results = defaultdict(list)
 
     for seed_offset in range(n_seeds):
@@ -65,7 +70,11 @@ def eval_filter_cold_start(
             if n_samples > 0:
                 chosen = rng.sample(train_samples, min(n_samples, len(train_samples)))
                 votes = [
-                    {"comment": s.comment, "vote": "upvote" if s.label == 1 else "downvote"}
+                    {
+                        "comment": s.comment,
+                        "vote": "upvote" if s.label == 1 else "downvote",
+                        **({"diff": s.diff} if pass_diffs else {}),
+                    }
                     for s in chosen
                 ]
                 filt.build_store(team_name, votes)
@@ -74,7 +83,14 @@ def eval_filter_cold_start(
                 filt.build_store(team_name, [])
                 filt.thresholds[team_name] = 0.0
 
-            preds = filt.predict(team_name, [s.comment for s in test_samples])
+            if pass_diffs:
+                preds = filt.predict(
+                    team_name,
+                    [s.comment for s in test_samples],
+                    diffs=[s.diff for s in test_samples],
+                )
+            else:
+                preds = filt.predict(team_name, [s.comment for s in test_samples])
             labels = [s.label for s in test_samples]
             decisions = [p["decision"] for p in preds]
             scores = [p["score"] for p in preds]
@@ -159,9 +175,7 @@ def eval_rl_teacher_cold_start(
                     outputs = model.generate(
                         **inputs,
                         max_new_tokens=max_new_tokens,
-                        temperature=0.7,
-                        top_p=0.9,
-                        do_sample=True,
+                        do_sample=False,
                         pad_token_id=tokenizer.pad_token_id,
                     )
                 generated = outputs[0][inputs["input_ids"].shape[1]:]
@@ -273,6 +287,7 @@ def main():
                 DistilledFilter, distilled_kwargs,
                 team_name, team.train_samples, test_subset,
                 steps, n_seeds, cfg.project.seed,
+                pass_diffs=True,
             )
         else:
             console.print("  [yellow]Distilled model not found, skipping[/yellow]")

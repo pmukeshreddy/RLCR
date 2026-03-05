@@ -57,9 +57,7 @@ def _score_batch_local(
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=max_new_tokens,
-                    temperature=0.7,
-                    top_p=0.9,
-                    do_sample=True,
+                    do_sample=False,
                     pad_token_id=tokenizer.pad_token_id,
                 )
             generated = outputs[0][inputs["input_ids"].shape[1]:]
