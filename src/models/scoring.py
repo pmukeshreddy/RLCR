@@ -336,16 +336,52 @@ class ReviewScorer:
         team_name: str,
         team_description: str,
         vote_history: list[dict],
+        max_workers: int = 32,
     ) -> list[ModelOutput]:
-        """Score multiple samples. Each sample needs 'diff' and 'comment' keys."""
-        results = []
+        """Score multiple samples concurrently via SGLang (or sequentially for local)."""
+        if not self.use_sglang or len(samples) <= 1:
+            return [
+                self.score(s["diff"], s["comment"], team_name, team_description, vote_history)
+                for s in samples
+            ]
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import requests
+
+        payloads = []
         for s in samples:
-            out = self.score(
-                diff=s["diff"],
-                comment=s["comment"],
-                team_name=team_name,
-                team_description=team_description,
-                vote_history=vote_history,
+            messages = format_scoring_prompt(
+                s["diff"], s["comment"], team_name, team_description, vote_history
             )
-            results.append(out)
+            payloads.append({
+                "model": self.model_name,
+                "messages": messages,
+                "max_tokens": self.max_new_tokens,
+                "temperature": self.temperature,
+                "top_p": 0.9,
+            })
+
+        results: list[ModelOutput] = [None] * len(payloads)
+
+        def _request(idx_payload):
+            idx, payload = idx_payload
+            try:
+                resp = requests.post(
+                    f"{self.sglang_url}/v1/chat/completions",
+                    json=payload,
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
+                return idx, parse_model_output(content)
+            except Exception as e:
+                logger.warning(f"Batch score request {idx} failed: {e}")
+                return idx, ModelOutput(reasoning="", score=0.5, decision="FILTER", raw_text="")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_request, (i, p)) for i, p in enumerate(payloads)]
+            for future in as_completed(futures):
+                idx, output = future.result()
+                results[idx] = output
+
         return results

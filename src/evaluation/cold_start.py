@@ -151,21 +151,16 @@ class ColdStartEvaluator:
                         for s in chosen_for_context
                     ]
 
-                labels = []
-                decisions = []
-                scores_list = []
-
-                for sample in test_samples:
-                    output = scorer.score(
-                        diff=sample.diff,
-                        comment=sample.comment,
-                        team_name=team_name,
-                        team_description=team_description,
-                        vote_history=vote_history,
-                    )
-                    labels.append(sample.label)
-                    decisions.append(output.binary_label)
-                    scores_list.append(output.score)
+                batch = [{"diff": s.diff, "comment": s.comment} for s in test_samples]
+                outputs = scorer.batch_score(
+                    batch,
+                    team_name=team_name,
+                    team_description=team_description,
+                    vote_history=vote_history,
+                )
+                labels = [s.label for s in test_samples]
+                decisions = [o.binary_label for o in outputs]
+                scores_list = [o.score for o in outputs]
 
                 metrics = compute_metrics(labels, decisions, scores_list)
                 step_results[n_samples].append(metrics)
@@ -273,21 +268,16 @@ def run_generalization_test(
             for s in train_samples
         ]
 
-        labels = []
-        decisions = []
-        scores_list = []
-
-        for sample in test_samples:
-            output = scorer.score(
-                diff=sample.diff,
-                comment=sample.comment,
-                team_name=test_team,
-                team_description=test_description,
-                vote_history=vote_history,
-            )
-            labels.append(sample.label)
-            decisions.append(output.binary_label)
-            scores_list.append(output.score)
+        batch = [{"diff": s.diff, "comment": s.comment} for s in test_samples]
+        outputs = scorer.batch_score(
+            batch,
+            team_name=test_team,
+            team_description=test_description,
+            vote_history=vote_history,
+        )
+        labels = [s.label for s in test_samples]
+        decisions = [o.binary_label for o in outputs]
+        scores_list = [o.score for o in outputs]
 
         metrics = compute_metrics(labels, decisions, scores_list)
         results.append(metrics)
