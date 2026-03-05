@@ -221,8 +221,13 @@ def rollout_local(
     device,
     max_tokens: int = 32,
     max_prompt_length: int = 1024,
+    temperature: float = 0.9,
 ) -> tuple[list[list[list[dict]]], list[torch.Tensor], list[list[torch.Tensor]]]:
-    """Fallback: generate completions with the local model (sequential, slower)."""
+    """On-policy generation with the LoRA-adapted model.
+
+    Batches all group_size completions per prompt in a single
+    model.generate() call for ~group_size× speedup over sequential.
+    """
     all_completions = []
     all_prompt_ids = []
     all_gen_ids = []
@@ -231,28 +236,35 @@ def rollout_local(
         prompt_enc = tokenizer(
             prompt, return_tensors="pt", truncation=True, max_length=max_prompt_length
         ).to(device)
+        prompt_len = prompt_enc["input_ids"].shape[1]
         all_prompt_ids.append(prompt_enc["input_ids"][0])
+
+        batch_ids = prompt_enc["input_ids"].expand(group_size, -1)
+        batch_mask = prompt_enc["attention_mask"].expand(group_size, -1)
+
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=batch_ids,
+                attention_mask=batch_mask,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_p=0.95,
+                do_sample=True,
+                return_dict_in_generate=True,
+                pad_token_id=tokenizer.pad_token_id,
+            )
 
         group_comps = []
         group_ids = []
-        for _ in range(group_size):
-            with torch.no_grad():
-                outputs = model.generate(
-                    **prompt_enc,
-                    max_new_tokens=max_tokens,
-                    temperature=1.2,
-                    top_p=0.95,
-                    do_sample=True,
-                    return_dict_in_generate=True,
-                    pad_token_id=tokenizer.pad_token_id,
-                )
-            gen_ids = outputs.sequences[0][prompt_enc["input_ids"].shape[1]:]
+        for j in range(group_size):
+            gen_ids = outputs.sequences[j][prompt_len:]
             text = tokenizer.decode(gen_ids, skip_special_tokens=True)
             group_comps.append([{"role": "assistant", "content": text}])
             group_ids.append(gen_ids)
 
         all_completions.append(group_comps)
         all_gen_ids.append(group_ids)
+        del outputs
 
     return all_completions, all_prompt_ids, all_gen_ids
 
@@ -445,17 +457,10 @@ class RLCRTrainer:
             num_training_steps=total_optim_steps,
         )
 
-        use_sglang = (
-            self.config.sglang_url is not None
-            and _probe_sglang(self.config.sglang_url)
-        )
-        if use_sglang:
-            logger.info(
-                f"Rollout via SGLang at {self.config.sglang_url} "
-                f"(concurrency={self.config.sglang_concurrent})"
-            )
-        else:
-            logger.info("Rollout via local model (no SGLang)")
+        # Always use on-policy local generation during training so that
+        # rollouts reflect the current LoRA policy, not a frozen base model.
+        use_sglang = False
+        logger.info("Rollout via local LoRA model (on-policy)")
 
         eps_low = self.config.clip_ratio_low
         eps_high = self.config.clip_ratio_high
@@ -511,6 +516,7 @@ class RLCRTrainer:
                         max_tokens=self.config.max_completion_length,
                         max_prompt_length=self.config.max_prompt_length,
                     )
+                torch.cuda.empty_cache()
 
                 # Phase 2: Rewards + dynamic sampling filter
                 batch_rewards = []
