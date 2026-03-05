@@ -535,10 +535,8 @@ class RLCRTrainer:
                     batch_rewards.append(group_rewards)
                     total_groups_seen += 1
 
-                    rewards_t = torch.tensor(group_rewards, dtype=torch.float32)
-                    reward_std = rewards_t.std().item()
-                    reward_range = (rewards_t.max() - rewards_t.min()).item()
-                    if self.config.dynamic_sampling and reward_range < 0.05:
+                    reward_std = torch.tensor(group_rewards).std().item()
+                    if self.config.dynamic_sampling and reward_std < 1e-8:
                         active_mask.append(False)
                         total_groups_skipped += 1
                     else:
@@ -554,7 +552,7 @@ class RLCRTrainer:
 
                     rewards_t = torch.tensor(group_rewards, dtype=torch.float32)
                     mean_r = rewards_t.mean()
-                    std_r = rewards_t.std().clamp(min=0.01)
+                    std_r = rewards_t.std() + 1e-8
                     advantages = (rewards_t - mean_r) / std_r
                     total_reward += mean_r.item()
                     n_reward_samples += 1
