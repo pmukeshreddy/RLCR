@@ -186,7 +186,7 @@ fi
 # =============================================
 
 TRAIN_ARGS="--config $CONFIG"
-SGLANG_MODEL="Qwen/Qwen3-4B"
+SGLANG_MODEL="Qwen/Qwen3-4B-Instruct-2507"
 if [ "$QUICK" = true ]; then
     TRAIN_ARGS="$TRAIN_ARGS --team security --small"
     SGLANG_MODEL="Qwen/Qwen3-1.7B"
