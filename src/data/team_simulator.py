@@ -87,37 +87,55 @@ class TeamSimulator:
         train_range: tuple[int, int] = (20, 50),
         min_test: int = 200,
         fallback_random: bool = True,
+        target_positive_rate: float = 0.6,
     ) -> dict[str, Team]:
-        """Assign samples to teams based on comment_type metadata.
+        """Assign samples to teams with balanced label distribution.
 
-        Uses COMMENT_TYPE_TO_TEAM mapping for direct assignment.
-        Falls back to keyword matching for samples without comment_type,
-        and random assignment for the remainder.
+        1. Route by comment_type (positive samples get meaningful types).
+        2. Collect ALL label=0 samples into a shared negative pool.
+        3. Distribute negatives across teams to hit target_positive_rate.
+
+        Without step 2-3, most teams would be ~100% positive (comment_type
+        only exists on label=1 samples), making the filtering task trivial.
         """
         logger.info(f"Assigning {len(samples)} samples to {len(self.teams)} teams")
 
-        team_assignments: dict[str, list[CodeReviewSample]] = defaultdict(list)
-        unassigned = []
+        team_positives: dict[str, list[CodeReviewSample]] = defaultdict(list)
+        negative_pool: list[CodeReviewSample] = []
+        unassigned_pos: list[CodeReviewSample] = []
 
         for sample in samples:
+            if sample.label == 0:
+                negative_pool.append(sample)
+                continue
+
             comment_type = getattr(sample, "comment_type", None) or ""
             team_name = COMMENT_TYPE_TO_TEAM.get(comment_type.lower().strip())
 
             if team_name and team_name in self.teams:
-                team_assignments[team_name].append(sample)
+                team_positives[team_name].append(sample)
             else:
                 team_name = self._keyword_fallback(sample)
                 if team_name:
-                    team_assignments[team_name].append(sample)
+                    team_positives[team_name].append(sample)
                 else:
-                    unassigned.append(sample)
+                    unassigned_pos.append(sample)
 
-        if fallback_random and unassigned:
-            logger.info(f"Randomly assigning {len(unassigned)} unmatched samples")
-            self.rng.shuffle(unassigned)
+        if unassigned_pos:
+            self.rng.shuffle(unassigned_pos)
             team_names = list(self.teams.keys())
-            for i, sample in enumerate(unassigned):
-                team_assignments[team_names[i % len(team_names)]].append(sample)
+            for i, sample in enumerate(unassigned_pos):
+                team_positives[team_names[i % len(team_names)]].append(sample)
+
+        logger.info(
+            f"  Positive pool: {sum(len(v) for v in team_positives.values())} "
+            f"across {len(team_positives)} teams"
+        )
+        logger.info(f"  Negative pool: {len(negative_pool)} samples to distribute")
+
+        team_assignments = self._balance_labels(
+            team_positives, negative_pool, target_positive_rate
+        )
 
         self._rebalance_if_needed(team_assignments, min_test)
         self._create_splits(team_assignments, train_range, min_test)
@@ -131,6 +149,51 @@ class TeamSimulator:
             )
 
         return self.teams
+
+    def _balance_labels(
+        self,
+        team_positives: dict[str, list[CodeReviewSample]],
+        negative_pool: list[CodeReviewSample],
+        target_positive_rate: float,
+    ) -> dict[str, list[CodeReviewSample]]:
+        """Distribute negatives across teams to achieve target label balance.
+
+        For each team with N positives, adds N * (1 - rate) / rate negatives
+        so the final ratio is approximately target_positive_rate.
+        """
+        self.rng.shuffle(negative_pool)
+        neg_idx = 0
+        assignments: dict[str, list[CodeReviewSample]] = {}
+
+        for team_name in self.teams:
+            positives = team_positives.get(team_name, [])
+            n_pos = len(positives)
+            if n_pos == 0:
+                assignments[team_name] = []
+                continue
+
+            n_neg_needed = int(n_pos * (1 - target_positive_rate) / target_positive_rate)
+            n_neg_available = len(negative_pool) - neg_idx
+            n_neg = min(n_neg_needed, n_neg_available)
+
+            negatives = negative_pool[neg_idx:neg_idx + n_neg]
+            neg_idx += n_neg
+
+            combined = positives + negatives
+            self.rng.shuffle(combined)
+            assignments[team_name] = combined
+
+            actual_rate = n_pos / len(combined) if combined else 0
+            logger.info(
+                f"  {team_name}: {n_pos} pos + {n_neg} neg "
+                f"= {len(combined)} total (positive_rate={actual_rate:.2f})"
+            )
+
+        remaining = len(negative_pool) - neg_idx
+        if remaining > 0:
+            logger.info(f"  {remaining} negatives unused (pool exhausted target)")
+
+        return assignments
 
     def _keyword_fallback(self, sample: CodeReviewSample) -> str | None:
         """Fall back to keyword matching if comment_type is unavailable."""
@@ -174,15 +237,37 @@ class TeamSimulator:
         train_range: tuple[int, int],
         min_test: int,
     ):
-        """Split each team's samples into train and test sets."""
-        for team_name, team_samples in assignments.items():
-            self.rng.shuffle(team_samples)
-            n_train = self.rng.randint(train_range[0], train_range[1])
-            n_train = min(n_train, len(team_samples) - min_test)
-            n_train = max(n_train, min(20, len(team_samples) // 2))
+        """Split each team's samples into train and test, preserving label ratio.
 
-            self.teams[team_name].train_samples = team_samples[:n_train]
-            self.teams[team_name].test_samples = team_samples[n_train:]
+        Stratified split: positives and negatives are split independently
+        so both train and test maintain the same positive/negative ratio.
+        """
+        for team_name, team_samples in assignments.items():
+            positives = [s for s in team_samples if s.label == 1]
+            negatives = [s for s in team_samples if s.label == 0]
+            self.rng.shuffle(positives)
+            self.rng.shuffle(negatives)
+
+            n_total = len(team_samples)
+            n_train = self.rng.randint(train_range[0], train_range[1])
+            n_train = min(n_train, n_total - min_test)
+            n_train = max(n_train, min(20, n_total // 2))
+
+            pos_rate = len(positives) / n_total if n_total > 0 else 0.5
+            n_train_pos = max(1, int(n_train * pos_rate))
+            n_train_neg = n_train - n_train_pos
+
+            n_train_pos = min(n_train_pos, len(positives))
+            n_train_neg = min(n_train_neg, len(negatives))
+
+            train = positives[:n_train_pos] + negatives[:n_train_neg]
+            test = positives[n_train_pos:] + negatives[n_train_neg:]
+
+            self.rng.shuffle(train)
+            self.rng.shuffle(test)
+
+            self.teams[team_name].train_samples = train
+            self.teams[team_name].test_samples = test
 
     def _build_vote_histories(self):
         """Build vote history from training labels.
