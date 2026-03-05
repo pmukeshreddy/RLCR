@@ -1,6 +1,7 @@
-"""Parse raw dataset into cleaned (diff, comment, was_addressed) triplets.
+"""Parse raw dataset into cleaned (diff, comment, label) triplets.
 
 Handles tokenization, truncation, and quality filtering.
+Now carries comment_type metadata for real team assignment.
 """
 
 from __future__ import annotations
@@ -19,9 +20,11 @@ class CodeReviewSample:
 
     diff: str
     comment: str
-    label: int  # 1 = addressed, 0 = ignored
+    label: int  # 1 = addressed, 0 = ignored/clean
     diff_tokens: int = 0
     comment_tokens: int = 0
+    comment_type: str = ""
+    quality_score: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -42,6 +45,7 @@ def parse_to_triplets(
       3. Clean comment text
       4. Tokenize and truncate to max_tokens
       5. Validate label values
+      6. Carry comment_type and quality_score metadata
     """
     tokenizer = _get_tokenizer(tokenizer_name)
     samples = []
@@ -69,12 +73,17 @@ def parse_to_triplets(
             n_filtered["encoding"] += 1
             continue
 
+        comment_type = row.get("comment_type", "") or ""
+        quality_score = row.get("quality_score", 0.0) or 0.0
+
         samples.append(CodeReviewSample(
             diff=diff,
             comment=comment,
             label=label,
             diff_tokens=diff_tok_count,
             comment_tokens=comment_tok_count,
+            comment_type=str(comment_type),
+            quality_score=float(quality_score),
         ))
 
     total = len(dataset)
@@ -156,6 +165,8 @@ def stream_triplets(
             batch.append(CodeReviewSample(
                 diff=diff, comment=comment, label=label,
                 diff_tokens=dtok, comment_tokens=ctok,
+                comment_type=str(row.get("comment_type", "")),
+                quality_score=float(row.get("quality_score", 0.0)),
             ))
         if len(batch) >= batch_size:
             yield batch

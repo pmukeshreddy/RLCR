@@ -56,6 +56,8 @@ def main():
                     label=row["label"],
                     diff_tokens=row.get("diff_tokens", 0),
                     comment_tokens=row.get("comment_tokens", 0),
+                    comment_type=row.get("comment_type", ""),
+                    quality_score=float(row.get("quality_score", 0.0)),
                 ))
             logger.info(f"Loaded {len(ds)} samples from {split_name}")
 

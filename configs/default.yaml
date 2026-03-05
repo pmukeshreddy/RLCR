@@ -5,8 +5,8 @@ project:
   device: "auto"  # auto, cuda, cpu
 
 data:
-  dataset_name: "microsoft/CodeReviewer"
-  subset: "cls"
+  dataset_name: "ronantakizawa/github-codereview"
+  subset: null
   max_tokens: 512
   cache_dir: "./data/cache"
   raw_dir: "./data/raw"

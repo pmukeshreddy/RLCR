@@ -141,11 +141,24 @@ launch_sglang() {
 }
 
 # =============================================
+# Clear old cached data to force fresh download of real dataset
+# =============================================
+
+if [ -d "data/cache/code_reviewer_processed" ]; then
+    echo "[*] Removing old cached data (switching to real dataset)..."
+    rm -rf data/cache/code_reviewer_processed
+fi
+if [ -d "data/processed" ]; then
+    echo "[*] Removing old processed data..."
+    rm -rf data/processed
+fi
+
+# =============================================
 # Steps 1-3: CPU only (data + embeddings)
 # =============================================
 
-run_step 1 "Download & Process Data" \
-    "python scripts/01_download_data.py --config $CONFIG"
+run_step 1 "Download & Process Real Data" \
+    "python scripts/01_download_data.py --config $CONFIG --force"
 
 run_step 2 "Team Simulation" \
     "python scripts/02_simulate_teams.py --config $CONFIG"

@@ -2,6 +2,18 @@
 
 **Teaching an LLM which code review comments actually matter — per team, from scratch, with ≤50 examples.**
 
+## Dataset
+
+**Real data, not synthetic.** We use [`ronantakizawa/github-codereview`](https://huggingface.co/datasets/ronantakizawa/github-codereview) — **218K+ real code review interactions** from 725 top GitHub repositories:
+
+- **167K+ positive examples**: Human reviewer left a comment, developer changed the code in response (label=1)
+- **51K+ negative examples**: Code that passed review without comments (label=0)
+- **Real comment types**: `security`, `performance`, `style`, `nitpick`, `suggestion`, `refactor`, `bug`, `question` — mapped directly to our 5 simulated teams
+- **Quality scores**: 0.0-1.0 per comment, from the dataset
+- **37 programming languages**, permissive licenses only, bot/AI reviewers excluded
+
+Teams are assigned by the real `comment_type` label — not keyword hacking.
+
 ## The Problem
 
 AI code review tools (Greptile, CodeRabbit, etc.) generate hundreds of comments per PR. Most are noise. The hard part isn't generating comments — it's deciding which ones to **surface** vs **filter**.
@@ -25,9 +37,9 @@ Greptile's team [documented](https://greptile.com): they tried 4 approaches, and
 ├──────────────────────────────────────────────────────┤
 │                                                       │
 │  ┌─────────┐    ┌──────────┐    ┌──────────────────┐ │
-│  │CodeReview│───▶│  Team    │───▶│  Per-Team Data   │ │
-│  │ Dataset  │    │Simulator │    │  (20-50 train)   │ │
-│  │ (116K)   │    │(5 teams) │    │  (200+ test)     │ │
+│  │  GitHub  │───▶│  Team    │───▶│  Per-Team Data   │ │
+│  │CodeReview│    │Simulator │    │  (20-50 train)   │ │
+│  │ (218K+)  │    │(5 teams) │    │  (200+ test)     │ │
 │  └─────────┘    └──────────┘    └────────┬─────────┘ │
 │                                           │           │
 │                    ┌──────────────────────┤           │
@@ -102,10 +114,10 @@ bash scripts/run_all.sh
 ### Step by step
 
 ```bash
-# 1. Download Microsoft CodeReviewer (116K samples)
+# 1. Download real GitHub Code Review dataset (218K+ samples, 725 repos)
 python scripts/01_download_data.py
 
-# 2. Cluster into 5 simulated teams
+# 2. Assign to 5 teams using real comment_type labels
 python scripts/02_simulate_teams.py
 
 # 3. Run embedding baseline (Greptile's approach, tuned fairly)
@@ -174,9 +186,9 @@ RLCR/
 │   └── default.yaml              # All hyperparameters
 ├── src/
 │   ├── data/
-│   │   ├── downloader.py         # HuggingFace + GitHub fallback
-│   │   ├── parser.py             # (diff, comment, label) triplets
-│   │   └── team_simulator.py     # 5-team clustering
+│   │   ├── downloader.py         # Real dataset from ronantakizawa/github-codereview
+│   │   ├── parser.py             # (diff, comment, label) triplets with comment_type
+│   │   └── team_simulator.py     # 5-team assignment via real comment_type labels
 │   ├── baselines/
 │   │   └── embedding_filter.py   # Soohoon's cosine similarity
 │   ├── models/

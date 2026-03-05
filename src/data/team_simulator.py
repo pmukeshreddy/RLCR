@@ -1,31 +1,42 @@
-"""Simulate 5 development teams by clustering code review comments.
+"""Simulate 5 development teams using real comment_type labels.
 
-Teams are defined by their comment preferences:
-  - security: Prioritizes vulnerability detection and secure coding
-  - style: Enforces naming conventions, formatting, consistency
-  - performance: Focuses on algorithmic efficiency and resource usage
-  - pragmatic: Values quick, actionable, low-ceremony feedback
-  - thorough: Provides detailed, educational, principle-driven reviews
+Teams map directly to the comment_type field from the dataset:
+  - security: security-related comments (bug + security types)
+  - style: style/formatting comments
+  - performance: performance optimization comments
+  - pragmatic: nitpicks, quick fixes, short comments
+  - thorough: suggestions, refactors, questions, detailed reviews
 
-Clustering uses keyword matching with TF-IDF weighting, plus comment-length
-heuristics for pragmatic (short) vs thorough (long) differentiation.
+This uses REAL comment categories from human reviewers, not synthetic
+keyword matching.
 """
 
 from __future__ import annotations
 
 import json
 import random
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from loguru import logger
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
 from src.data.parser import CodeReviewSample
+
+
+COMMENT_TYPE_TO_TEAM = {
+    "security": "security",
+    "bug": "security",
+    "style": "style",
+    "performance": "performance",
+    "nitpick": "pragmatic",
+    "none": "pragmatic",
+    "suggestion": "thorough",
+    "refactor": "thorough",
+    "question": "thorough",
+}
 
 
 @dataclass
@@ -56,7 +67,7 @@ class Team:
 
 
 class TeamSimulator:
-    """Assigns code review samples to simulated teams and manages splits."""
+    """Assigns code review samples to teams using real comment_type labels."""
 
     def __init__(self, team_configs: list[dict], seed: int = 42):
         self.seed = seed
@@ -67,18 +78,8 @@ class TeamSimulator:
             self.teams[tc["name"]] = Team(
                 name=tc["name"],
                 description=tc["description"],
-                keywords=[kw.lower() for kw in tc["keywords"]],
+                keywords=[kw.lower() for kw in tc.get("keywords", [])],
             )
-        self._build_keyword_index()
-
-    def _build_keyword_index(self):
-        """Pre-compile keyword patterns for fast matching."""
-        import re
-        self._patterns: dict[str, list[re.Pattern]] = {}
-        for name, team in self.teams.items():
-            self._patterns[name] = [
-                re.compile(re.escape(kw), re.IGNORECASE) for kw in team.keywords
-            ]
 
     def assign_samples(
         self,
@@ -87,35 +88,29 @@ class TeamSimulator:
         min_test: int = 200,
         fallback_random: bool = True,
     ) -> dict[str, Team]:
-        """Assign samples to teams based on comment content analysis.
+        """Assign samples to teams based on comment_type metadata.
 
-        Uses a multi-signal scoring approach:
-          1. Keyword match count (weighted by TF-IDF rarity)
-          2. Comment length (pragmatic=short, thorough=long)
-          3. Sentiment/tone patterns
+        Uses COMMENT_TYPE_TO_TEAM mapping for direct assignment.
+        Falls back to keyword matching for samples without comment_type,
+        and random assignment for the remainder.
         """
         logger.info(f"Assigning {len(samples)} samples to {len(self.teams)} teams")
 
         team_assignments: dict[str, list[CodeReviewSample]] = defaultdict(list)
         unassigned = []
 
-        keyword_scores = self._compute_keyword_scores(samples)
-        length_scores = self._compute_length_scores(samples)
+        for sample in samples:
+            comment_type = getattr(sample, "comment_type", None) or ""
+            team_name = COMMENT_TYPE_TO_TEAM.get(comment_type.lower().strip())
 
-        for i, sample in enumerate(samples):
-            combined = {}
-            for team_name in self.teams:
-                kw = keyword_scores.get(team_name, {}).get(i, 0.0)
-                ln = length_scores.get(team_name, {}).get(i, 0.0)
-                combined[team_name] = 0.7 * kw + 0.3 * ln
-
-            best_team = max(combined, key=combined.get)
-            best_score = combined[best_team]
-
-            if best_score > 0.1:
-                team_assignments[best_team].append(sample)
+            if team_name and team_name in self.teams:
+                team_assignments[team_name].append(sample)
             else:
-                unassigned.append(sample)
+                team_name = self._keyword_fallback(sample)
+                if team_name:
+                    team_assignments[team_name].append(sample)
+                else:
+                    unassigned.append(sample)
 
         if fallback_random and unassigned:
             logger.info(f"Randomly assigning {len(unassigned)} unmatched samples")
@@ -137,40 +132,20 @@ class TeamSimulator:
 
         return self.teams
 
-    def _compute_keyword_scores(
-        self, samples: list[CodeReviewSample]
-    ) -> dict[str, dict[int, float]]:
-        """Score each sample against each team's keywords."""
-        scores: dict[str, dict[int, float]] = defaultdict(dict)
-        for i, sample in enumerate(samples):
-            text = sample.comment.lower()
-            for team_name, patterns in self._patterns.items():
-                match_count = sum(1 for p in patterns if p.search(text))
-                scores[team_name][i] = match_count / max(len(patterns), 1)
-        return scores
-
-    def _compute_length_scores(
-        self, samples: list[CodeReviewSample]
-    ) -> dict[str, dict[int, float]]:
-        """Score based on comment length (pragmatic=short, thorough=long)."""
-        scores: dict[str, dict[int, float]] = defaultdict(dict)
-        lengths = [len(s.comment) for s in samples]
-        if not lengths:
-            return scores
-        median_len = np.median(lengths)
-        p25 = np.percentile(lengths, 25)
-        p75 = np.percentile(lengths, 75)
-
-        for i, sample in enumerate(samples):
-            clen = len(sample.comment)
-            for team_name in self.teams:
-                if team_name == "pragmatic":
-                    scores[team_name][i] = max(0, 1.0 - clen / max(p25 * 2, 1))
-                elif team_name == "thorough":
-                    scores[team_name][i] = max(0, min(1.0, (clen - p75) / max(p75, 1)))
-                else:
-                    scores[team_name][i] = 0.0
-        return scores
+    def _keyword_fallback(self, sample: CodeReviewSample) -> str | None:
+        """Fall back to keyword matching if comment_type is unavailable."""
+        text = sample.comment.lower()
+        best_team = None
+        best_score = 0.0
+        for name, team in self.teams.items():
+            if not team.keywords:
+                continue
+            hits = sum(1 for kw in team.keywords if kw in text)
+            score = hits / len(team.keywords)
+            if score > best_score and score > 0.05:
+                best_score = score
+                best_team = name
+        return best_team
 
     def _rebalance_if_needed(
         self,
@@ -210,9 +185,11 @@ class TeamSimulator:
             self.teams[team_name].test_samples = team_samples[n_train:]
 
     def _build_vote_histories(self):
-        """Simulate upvote/downvote history from training labels.
+        """Build vote history from training labels.
 
-        This provides the embedding baseline with realistic historical feedback.
+        For real data, label=1 means the reviewer's comment led to a code change
+        (addressed = upvote), label=0 means the code was clean / no change needed
+        (downvote for surfacing unnecessary comments).
         """
         for team in self.teams.values():
             team.vote_history = []
