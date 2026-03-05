@@ -34,7 +34,6 @@ from src.evaluation.cold_start import ColdStartEvaluator, run_generalization_tes
 from src.evaluation.metrics import compute_metrics
 from src.models.scoring import ReviewScorer
 from src.models.sglang_server import SGLangServer
-from src.training.grpo import build_training_dataset, train_all_teams, GRPORunConfig, RLCRTrainer
 
 console = Console()
 
@@ -121,44 +120,9 @@ def main():
             sglang_url=sglang_url,
         )
 
-        dapo_cfg = cfg.training.dapo
-        sglang_train_url = sglang_url if use_sglang else None
-
-        def make_train_fn(t_name, t_desc, t_votes):
-            """Create a train_fn closure that trains a fresh LoRA from N samples."""
-            def train_fn(samples, seed=42):
-                from transformers import AutoTokenizer as AT
-                tok = AT.from_pretrained(model_name, trust_remote_code=True)
-                if tok.pad_token is None:
-                    tok.pad_token = tok.eos_token
-                sample_dicts = [s.to_dict() for s in samples]
-                ds = build_training_dataset(sample_dicts, t_name, t_desc, t_votes, tok)
-                rc = GRPORunConfig(
-                    model_name=model_name,
-                    output_dir=f"outputs/dapo_coldstart/{t_name}_n{len(samples)}_s{seed}",
-                    team_name=t_name,
-                    team_description=t_desc,
-                    vote_history=t_votes,
-                    lora_target_modules=list(cfg.training.lora.target_modules),
-                    group_size=min(getattr(dapo_cfg, "group_size", 8), 4),
-                    num_epochs=1,
-                    per_device_batch_size=getattr(dapo_cfg, "per_device_batch_size", 2),
-                    max_completion_length=getattr(dapo_cfg, "max_completion_length", 256),
-                    ppo_epochs=1,
-                    seed=seed,
-                    sglang_url=sglang_train_url,
-                )
-                trainer = RLCRTrainer(rc)
-                trainer.train(ds, None)
-            return train_fn
-
         for team_name, team in simulator.teams.items():
             console.print(f"\n[cyan]Evaluating RL: {team_name}[/cyan]")
-
             test_subset = team.test_samples[:50]
-            train_fn = make_train_fn(
-                team_name, team.description, team.vote_history
-            )
 
             cold_start.evaluate_rl_model(
                 scorer=scorer,
@@ -166,7 +130,6 @@ def main():
                 team_description=team.description,
                 all_train_samples=team.train_samples,
                 test_samples=test_subset,
-                train_fn=train_fn,
             )
 
     # --- Aggregate Results ---

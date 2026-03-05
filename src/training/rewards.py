@@ -94,7 +94,8 @@ class CodeReviewReward:
         self.max_completion_length = max_completion_length
         self.action_rate_target = action_rate_target
         self.action_rate_penalty = action_rate_penalty
-        self._recent_scores: list[float] = []
+        self._ema_score: float = 0.5
+        self._ema_alpha: float = 0.1
 
     def __call__(
         self,
@@ -104,6 +105,8 @@ class CodeReviewReward:
         """Compute rewards for a batch of completions.
 
         Compatible with TRL's GRPOTrainer reward function signature.
+        Action rate penalty uses an exponential moving average across
+        batches (not per-group) for stable signal.
         """
         label = kwargs.get("label", [0] * len(completions))
         rewards = []
@@ -114,9 +117,15 @@ class CodeReviewReward:
             rewards.append(r)
             batch_scores.append(s)
 
-        if self.action_rate_penalty > 0 and batch_scores:
-            mean_score = sum(batch_scores) / len(batch_scores)
-            drift = max(0.0, mean_score - self.action_rate_target)
+        if batch_scores:
+            batch_mean = sum(batch_scores) / len(batch_scores)
+            self._ema_score = (
+                self._ema_alpha * batch_mean
+                + (1 - self._ema_alpha) * self._ema_score
+            )
+
+        if self.action_rate_penalty > 0:
+            drift = max(0.0, self._ema_score - self.action_rate_target)
             penalty = drift * self.action_rate_penalty
             rewards = [r - penalty for r in rewards]
 

@@ -42,13 +42,10 @@ def main():
     set_seed(cfg)
 
     model_name = cfg.model.small.name if args.small else cfg.model.large.name
-    sglang_url = None
-    if cfg.model.sglang.get("enabled", True):
-        sglang_url = f"http://{cfg.model.sglang.host}:{cfg.model.sglang.port}"
 
     console.rule("[bold blue]Step 9: Teacher Labeling[/bold blue]")
     console.print(f"Model: {model_name}")
-    console.print(f"SGLang: {'enabled' if sglang_url else 'disabled'}")
+    console.print(f"Inference: local (LoRA adapters loaded per team)")
 
     teams_dir = Path(cfg.data.processed_dir) / "teams"
     if not teams_dir.exists():
@@ -61,7 +58,7 @@ def main():
     labels = label_all_teams(
         teams=simulator.teams,
         model_name=model_name,
-        sglang_url=sglang_url,
+        lora_base_dir="outputs/dapo",
         max_new_tokens=cfg.model.large.max_new_tokens,
     )
 

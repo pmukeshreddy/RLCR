@@ -234,31 +234,22 @@ run_step 6b "A/B Split Test" \
 # (SGLang still running for teacher inference)
 # =============================================
 
+# Kill SGLang — teacher labeling uses local inference with LoRA adapters
+kill_sglang_on_port "$SGLANG_PORT"
+
 TEACHER_ARGS="--config $CONFIG"
 if [ "$QUICK" = true ]; then
     TEACHER_ARGS="$TEACHER_ARGS --small"
 fi
 
-run_step 9 "Teacher Labeling (score corpus with trained DAPO models)" \
+run_step 9 "Teacher Labeling (score corpus with LoRA adapters, local inference)" \
     "python scripts/09_teacher_label.py $TEACHER_ARGS"
-
-# Kill SGLang — distillation and eval run on CPU/sentence-transformers
-kill_sglang_on_port "$SGLANG_PORT"
 
 run_step 10 "Distillation (fine-tune sentence transformer from teacher labels)" \
     "python scripts/10_distill.py --config $CONFIG"
 
-# Relaunch SGLang for three-way eval (RL teacher inference)
-if [ "$NO_SGLANG" = false ]; then
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo " Restart SGLang for three-way evaluation"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.90
-fi
-
 run_step 11 "Three-Way Evaluation (vanilla vs RL teacher vs distilled)" \
-    "python scripts/11_eval_distilled.py $EVAL_ARGS --distilled-model outputs/distilled_model"
+    "python scripts/11_eval_distilled.py --config $CONFIG --distilled-model outputs/distilled_model --lora-dir outputs/dapo"
 
 # =============================================
 # Step 7: Scale to larger model (skip in quick mode)

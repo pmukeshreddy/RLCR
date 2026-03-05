@@ -30,10 +30,14 @@ from torch.utils.data import DataLoader
 
 
 def _format_input(record: dict) -> str:
-    """Format a single record into the text fed to the sentence transformer."""
+    """Format a single record into the text fed to the sentence transformer.
+
+    Truncation matches the scoring prompt limits (diff[:1500], comment[:500])
+    so the student sees the same context window the teacher scored on.
+    """
     team = record.get("team", "")
-    diff = record.get("diff", "")[:500]
-    comment = record.get("comment", "")[:300]
+    diff = record.get("diff", "")[:1500]
+    comment = record.get("comment", "")[:500]
     return f"[{team}] {diff} [SEP] {comment}"
 
 
