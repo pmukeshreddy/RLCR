@@ -109,17 +109,18 @@ def build_training_dataset(
 # ---------------------------------------------------------------------------
 
 def _probe_sglang(url: str) -> bool:
-    """Check if an SGLang server is healthy."""
-    try:
-        import requests
-        resp = requests.get(f"{url}/health", timeout=10)
-        if resp.status_code == 200:
-            return True
-        logger.warning(f"SGLang health check returned {resp.status_code}: {resp.text[:200]}")
-        return False
-    except Exception as e:
-        logger.warning(f"SGLang health check failed at {url}: {e}")
-        return False
+    """Check if an SGLang server is healthy. Tries multiple endpoints."""
+    import requests
+    for endpoint in ["/health", "/v1/models"]:
+        try:
+            resp = requests.get(f"{url}{endpoint}", timeout=10)
+            if resp.status_code == 200:
+                logger.info(f"SGLang healthy at {url}{endpoint}")
+                return True
+        except Exception:
+            continue
+    logger.warning(f"SGLang not reachable at {url} (tried /health and /v1/models)")
+    return False
 
 
 def _sglang_generate_one(args: tuple) -> str:
@@ -273,13 +274,15 @@ class RLCRTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model_name,
             torch_dtype=dtype,
-            device_map="auto" if torch.cuda.is_available() else None,
             trust_remote_code=True,
         )
+        if torch.cuda.is_available():
+            self.model.to("cuda")
+        self.model.gradient_checkpointing_enable()
 
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -580,13 +583,15 @@ def train_all_teams(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=dtype,
-        device_map="auto" if torch.cuda.is_available() else None,
         trust_remote_code=True,
     )
+    if torch.cuda.is_available():
+        base_model.to("cuda")
+    base_model.gradient_checkpointing_enable()
 
     lora_target = config_dict.get("lora_target_modules", ["q_proj", "v_proj"])
     sglang_url = config_dict.get("sglang_url")
