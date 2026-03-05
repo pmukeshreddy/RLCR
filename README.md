@@ -2,14 +2,11 @@
 
 **Teaching an LLM which code review comments actually matter — per team, from scratch, with ≤50 examples.**
 
-> *"We tried cosine similarity, tried fine-tuning a classifier, tried prompting GPT-4... none of it worked well enough."*  
-> — [Soohoon Park, Greptile](https://greptile.com) on filtering AI-generated code review comments
-
 ## The Problem
 
 AI code review tools (Greptile, CodeRabbit, etc.) generate hundreds of comments per PR. Most are noise. The hard part isn't generating comments — it's deciding which ones to **surface** vs **filter**.
 
-Greptile's team [documented their struggle](https://greptile.com): they tried 4 approaches, and embedding-based cosine similarity was their best bet. But it has fundamental limitations:
+Greptile's team [documented](https://greptile.com): they tried 4 approaches, and embedding-based cosine similarity was their best bet. But it has fundamental limitations:
 
 | Approach | Problem |
 |----------|---------|
