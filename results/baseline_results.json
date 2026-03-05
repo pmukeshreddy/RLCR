@@ -1,0 +1,52 @@
+{
+  "security": {
+    "accuracy": 0.5958333333333333,
+    "precision": 0.7075471698113207,
+    "recall": 0.5319148936170213,
+    "f1": 0.6072874493927125,
+    "action_rate": 0.44166666666666665,
+    "threshold": 0.05,
+    "n_samples": 240,
+    "n_votes": 26
+  },
+  "style": {
+    "accuracy": 0.5418502202643172,
+    "precision": 0.5412844036697247,
+    "recall": 0.9672131147540983,
+    "f1": 0.6941176470588234,
+    "action_rate": 0.960352422907489,
+    "threshold": 0.05,
+    "n_samples": 227,
+    "n_votes": 38
+  },
+  "performance": {
+    "accuracy": 0.5502183406113537,
+    "precision": 0.5360824742268041,
+    "recall": 0.8888888888888888,
+    "f1": 0.6688102893890676,
+    "action_rate": 0.8471615720524017,
+    "threshold": 0.05,
+    "n_samples": 229,
+    "n_votes": 36
+  },
+  "pragmatic": {
+    "accuracy": 0.5106779418088003,
+    "precision": 0.48140963465890724,
+    "recall": 0.45134889360412245,
+    "f1": 0.46589486858573215,
+    "action_rate": 0.44331374516267735,
+    "threshold": 0.05,
+    "n_samples": 6977,
+    "n_votes": 20
+  },
+  "thorough": {
+    "accuracy": 0.6848623853211009,
+    "precision": 0.6848623853211009,
+    "recall": 1.0,
+    "f1": 0.8129594337054179,
+    "action_rate": 1.0,
+    "threshold": 0.05,
+    "n_samples": 2180,
+    "n_votes": 27
+  }
+}

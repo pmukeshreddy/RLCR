@@ -1,0 +1,32 @@
+{
+  "security": {
+    "best_reward": "0.8220832993586858",
+    "total_steps": "39",
+    "team": "security",
+    "output_dir": "outputs/grpo/security"
+  },
+  "style": {
+    "best_reward": "0.9943749643862247",
+    "total_steps": "57",
+    "team": "style",
+    "output_dir": "outputs/grpo/style"
+  },
+  "performance": {
+    "best_reward": "1.1959374696016312",
+    "total_steps": "54",
+    "team": "performance",
+    "output_dir": "outputs/grpo/performance"
+  },
+  "pragmatic": {
+    "best_reward": "1.307812511920929",
+    "total_steps": "30",
+    "team": "pragmatic",
+    "output_dir": "outputs/grpo/pragmatic"
+  },
+  "thorough": {
+    "best_reward": "0.6643749698996544",
+    "total_steps": "42",
+    "team": "thorough",
+    "output_dir": "outputs/grpo/thorough"
+  }
+}
