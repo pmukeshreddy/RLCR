@@ -1,7 +1,7 @@
 """SGLang server lifecycle management via subprocess.
 
 Handles launching, health-checking, and killing the SGLang server so it
-doesn't conflict with GRPO training for GPU memory. The server is only
+doesn't conflict with DAPO training for GPU memory. The server is only
 alive during evaluation — never during training.
 
 Usage:

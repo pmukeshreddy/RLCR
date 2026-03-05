@@ -2,7 +2,7 @@
 """Step 7: Scale to Qwen3-4B.
 
 Swaps the model to a larger variant, retrains, and compares results:
-  - Retrain GRPO with the larger model
+  - Retrain DAPO with the larger model
   - Re-evaluate with the same cold-start protocol
   - Generate 1.7B vs 4B comparison data
 
@@ -70,18 +70,24 @@ def main():
         console.rule("[bold]Training with larger model[/bold]")
         console.print(f"[cyan]Model loaded once, LoRA swapped per team[/cyan]")
 
+        dapo = cfg.training.dapo
         config_dict = {
             "model_name": large_model,
-            "base_output_dir": "outputs/grpo_large",
+            "base_output_dir": "outputs/dapo_large",
             "lora_r": cfg.training.lora.r,
             "lora_alpha": cfg.training.lora.alpha,
             "lora_dropout": cfg.training.lora.get("dropout", 0.05),
             "lora_target_modules": list(cfg.training.lora.target_modules),
-            "group_size": cfg.training.grpo.group_size,
-            "learning_rate": cfg.training.grpo.learning_rate,
-            "num_epochs": cfg.training.grpo.num_epochs,
-            "per_device_batch_size": max(1, cfg.training.grpo.per_device_batch_size // 2),
-            "gradient_accumulation_steps": cfg.training.grpo.gradient_accumulation_steps * 2,
+            "group_size": dapo.group_size,
+            "learning_rate": dapo.learning_rate,
+            "num_epochs": dapo.num_epochs,
+            "per_device_batch_size": max(1, dapo.per_device_batch_size // 2),
+            "gradient_accumulation_steps": dapo.gradient_accumulation_steps * 2,
+            "clip_ratio_low": dapo.clip_ratio_low,
+            "clip_ratio_high": dapo.clip_ratio_high,
+            "dynamic_sampling": dapo.dynamic_sampling,
+            "overlong_penalty": dapo.overlong_penalty,
+            "overlong_buffer_len": dapo.overlong_buffer_len,
             "seed": cfg.project.seed,
             "sglang_url": sglang_url,
         }

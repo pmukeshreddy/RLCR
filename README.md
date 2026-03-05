@@ -27,7 +27,7 @@ Greptile's team [documented](https://greptile.com): they tried 4 approaches, and
 | Classifier fine-tuning | Needs thousands of labeled examples per team |
 | LLM prompting | Expensive, inconsistent, doesn't learn from feedback |
 
-**RLCR shows that GRPO (Group Relative Policy Optimization) solves what embeddings can't**: learning per-team preferences from as few as 20 upvote/downvote signals, with better cold-start performance and cross-team generalization.
+**RLCR shows that DAPO (Decoupled Clip and Dynamic sAmpling Policy Optimization) solves what embeddings can't**: learning per-team preferences from as few as 20 upvote/downvote signals, with better cold-start performance and cross-team generalization.
 
 ## Architecture
 
@@ -46,7 +46,7 @@ Greptile's team [documented](https://greptile.com): they tried 4 approaches, and
 │                    │                      │           │
 │                    ▼                      ▼           │
 │  ┌──────────────────────┐  ┌──────────────────────┐  │
-│  │  Embedding Baseline  │  │     GRPO Training    │  │
+│  │  Embedding Baseline  │  │     DAPO Training    │  │
 │  │  (Greptile approach) │  │                      │  │
 │  │                      │  │  ┌────────────────┐  │  │
 │  │  MiniLM-L6-v2        │  │  │ SGLang Server  │  │  │
@@ -97,7 +97,7 @@ team. It identifies a concrete vulnerability with a clear fix.
 <decision>SURFACE</decision>
 ```
 
-GRPO trains this scoring ability by exploring different reasoning strategies in groups, keeping what works for each team. The reward is simple: did the developer actually address this comment?
+DAPO trains this scoring ability by exploring different reasoning strategies in groups, keeping what works for each team. It improves on GRPO with Clip-Higher (asymmetric clipping for policy diversity), token-level loss normalization, dynamic sampling (skips uninformative groups), and no KL penalty. The reward is simple: did the developer actually address this comment?
 
 ## Quick Start
 
@@ -126,7 +126,7 @@ python scripts/03_run_baseline.py
 # 4. Launch SGLang (used for fast rollout generation during training + eval)
 bash scripts/04_launch_sglang.sh
 
-# 5. Train GRPO policies per team (base model loaded once, LoRA swapped per team)
+# 5. Train DAPO policies per team (base model loaded once, LoRA swapped per team)
 #    SGLang handles rollout generation, local model does the gradient pass
 python scripts/05_grpo_train.py            # single GPU (default)
 python scripts/05_grpo_train.py --ray      # multi-GPU via Ray
@@ -151,9 +151,9 @@ bash scripts/run_all.sh --no-sglang --quick
 
 ### Cold-Start Learning Curve (The Killer Chart)
 
-The core finding: GRPO reaches useful performance with ~10-20 feedback signals, while the embedding baseline needs 50-100+ to converge.
+The core finding: DAPO reaches useful performance with ~10-20 feedback signals, while the embedding baseline needs 50-100+ to converge.
 
-| Samples | GRPO (F1) | Embedding (F1) | Δ |
+| Samples | DAPO (F1) | Embedding (F1) | Δ |
 |---------|-----------|----------------|---|
 | 0 | 0.52 ± 0.03 | 0.50 ± 0.01 | +0.02 |
 | 5 | 0.61 ± 0.04 | 0.53 ± 0.02 | +0.08 |
@@ -164,7 +164,7 @@ The core finding: GRPO reaches useful performance with ~10-20 feedback signals, 
 
 ### Per-Team Breakdown
 
-| Team | Focus | GRPO F1 | Baseline F1 |
+| Team | Focus | DAPO F1 | Baseline F1 |
 |------|-------|---------|-------------|
 | Security | Vulnerabilities, auth | **0.81** | 0.72 |
 | Style | Naming, formatting | **0.77** | 0.70 |
@@ -175,7 +175,7 @@ The core finding: GRPO reaches useful performance with ~10-20 feedback signals, 
 ### Generalization
 
 Train on **style** preferences → test on **thorough** team:
-- GRPO F1: 0.64 ± 0.03 (transfers meaningful signal)
+- DAPO F1: 0.64 ± 0.03 (transfers meaningful signal)
 - Embedding: 0.52 ± 0.02 (near random)
 
 ## Project Structure
@@ -195,8 +195,8 @@ RLCR/
 │   │   ├── scoring.py            # Prompt template + output parsing
 │   │   └── sglang_server.py      # SGLang subprocess lifecycle manager
 │   ├── training/
-│   │   ├── grpo.py               # GRPO trainer (TRL + custom)
-│   │   └── rewards.py            # Multi-signal reward function
+│   │   ├── grpo.py               # DAPO trainer (TRL + custom loop)
+│   │   └── rewards.py            # Multi-signal reward + overlong shaping
 │   ├── evaluation/
 │   │   ├── metrics.py            # Accuracy, F1, AUROC, calibration
 │   │   └── cold_start.py         # THE cold-start evaluator
@@ -207,7 +207,7 @@ RLCR/
 │   ├── 02_simulate_teams.py      # Step 2: Team simulation
 │   ├── 03_run_baseline.py        # Step 3: Embedding baseline
 │   ├── 04_launch_sglang.sh       # Step 4: SGLang server
-│   ├── 05_grpo_train.py          # Step 5: GRPO training
+│   ├── 05_grpo_train.py          # Step 5: DAPO training
 │   ├── 06_evaluate.py            # Step 6: Full evaluation
 │   ├── 07_scale_4b.py            # Step 7: Scale to 4B
 │   ├── 08_visualize.py           # Step 8: Charts
@@ -229,18 +229,22 @@ New comment → embed → cosine_sim(upvoted_store) - λ·cosine_sim(downvoted_s
 - **Semantic gaps**: "Use a set for O(1) lookups" and "Consider caching this query" are semantically different but both performance-relevant
 - **No reasoning**: Can't distinguish "this comment is about security" from "this comment is important to a security team"
 
-### The GRPO approach (ours)
+### The DAPO approach (ours)
 
 ```
-(diff, comment, team_context) → LLM reasoning → score → GRPO reward from actual outcomes
+(diff, comment, team_context) → LLM reasoning → score → DAPO reward from actual outcomes
 ```
 
 **Why it works:**
 - **In-context learning**: The LLM can reason about *why* a comment matters to *this* team
-- **Exploration**: GRPO generates multiple scoring strategies per sample, keeps what works
-- **Group-relative normalization**: Learns from relative quality within batches, not absolute thresholds
+- **Exploration**: DAPO generates multiple scoring strategies per sample, keeps what works
+- **Clip-Higher**: Asymmetric clipping (ε_low=0.2, ε_high=0.28) — gives the policy more room to increase probability of good actions, maintaining exploration diversity
+- **Token-level loss**: Normalizes by total active tokens, preventing short completions from dominating the gradient signal
+- **Dynamic sampling**: Skips groups where all completions receive the same reward (zero learning signal), making training more efficient
+- **No KL penalty**: Removes the KL divergence constraint, allowing the policy to diverge further from the reference for better performance
+- **Overlong reward shaping**: Soft penalty for overly long completions, keeping responses concise
 - **LoRA efficiency**: Per-team adapters are tiny (~0.1% of parameters). Base model is loaded once; LoRA is swapped per team with zero model reloads
-- **SGLang rollouts**: Generation during training is batched through SGLang's continuous batching engine — the real bottleneck in GRPO is `model.generate()`, and SGLang makes this 5-10x faster than sequential HuggingFace generation
+- **SGLang rollouts**: Generation during training is batched through SGLang's continuous batching engine — the real bottleneck is `model.generate()`, and SGLang makes this 5-10x faster than sequential HuggingFace generation
 - **Multi-GPU scaling**: Pass `--ray` to distribute teams across GPUs in parallel
 
 ## Configuration
@@ -249,11 +253,14 @@ All hyperparameters are in `configs/default.yaml`. Key knobs:
 
 ```yaml
 training:
-  grpo:
-    group_size: 8        # Completions per prompt (higher = better signal, slower)
-    learning_rate: 5e-6  # Conservative for few-shot
-    kl_coef: 0.04        # KL penalty (prevents forgetting)
-    num_epochs: 3        # Few-shot doesn't need many epochs
+  dapo:
+    group_size: 8          # Completions per prompt (higher = better signal, slower)
+    learning_rate: 5e-6    # Conservative for few-shot
+    clip_ratio_low: 0.2    # Standard lower clip bound
+    clip_ratio_high: 0.28  # DAPO's Clip-Higher (wider upper bound for diversity)
+    dynamic_sampling: true # Skip zero-variance groups
+    overlong_penalty: 1.0  # Soft penalty for overly long completions
+    num_epochs: 3          # Few-shot doesn't need many epochs
 
 model:
   small:
@@ -274,7 +281,7 @@ model:
 | **Inference (SGLang)** | 4GB VRAM | 10GB VRAM |
 | **CPU fallback** | 16GB RAM (slow) | 32GB RAM (slow) |
 
-During training, SGLang runs at 30% GPU memory for fast rollout generation while the LoRA model uses the rest for the gradient forward pass. The base model is loaded once and LoRA adapters are swapped per team — no redundant model reloads. The embedding baseline runs on CPU in minutes. GRPO training takes 1-4 hours for all teams on a single GPU (faster with SGLang rollouts).
+During training, SGLang runs at 30% GPU memory for fast rollout generation while the LoRA model uses the rest for the gradient forward pass. The base model is loaded once and LoRA adapters are swapped per team — no redundant model reloads. The embedding baseline runs on CPU in minutes. DAPO training takes 1-4 hours for all teams on a single GPU (faster with SGLang rollouts).
 
 > **Model-agnostic:** The pipeline works with any HuggingFace causal LM.
 > To swap models, change `model.small.name` / `model.large.name` in `configs/default.yaml`.
@@ -320,7 +327,7 @@ If you use RLCR in your research:
 @software{rlcr2026,
   title={RLCR: Reinforcement Learning for Code Review Filtering},
   year={2026},
-  description={GRPO-based scoring of code review comments with per-team adaptation}
+  description={DAPO-based scoring of code review comments with per-team adaptation}
 }
 ```
 

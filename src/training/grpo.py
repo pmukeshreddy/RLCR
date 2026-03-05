@@ -1,4 +1,11 @@
-"""GRPO (Group Relative Policy Optimization) training for code review scoring.
+"""DAPO (Decoupled Clip and Dynamic sAmpling Policy Optimization) training
+for code review scoring.
+
+DAPO extends GRPO with four techniques:
+  1. Clip-Higher: asymmetric clipping (e_low=0.2, e_high=0.28)
+  2. Token-level loss: normalize by total active tokens, not per-sequence
+  3. Dynamic sampling: skip groups where all completions have identical rewards
+  4. No KL penalty
 
 Architecture for rollout generation:
 
@@ -15,7 +22,7 @@ Architecture for rollout generation:
        │
        │  log_softmax → gather token log-probs
        ▼
-  Policy Gradient Loss  ──►  backward()  ──►  optimizer.step()
+  DAPO Policy Gradient Loss  ──►  backward()  ──►  optimizer.step()
 
 SGLang handles the expensive generation (continuous batching, KV-cache reuse).
 The local model only runs forward passes for differentiable log-probs.
@@ -35,13 +42,17 @@ from loguru import logger
 from peft import LoraConfig, get_peft_model, TaskType
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.models.scoring import format_prompt_text
-from src.training.rewards import CodeReviewReward, format_reward
+from src.models.scoring import format_prompt_text, format_training_prompt_text
+from src.training.rewards import CodeReviewReward
 
 
 @dataclass
 class GRPORunConfig:
-    """Configuration for a single GRPO training run."""
+    """Configuration for a DAPO training run.
+
+    DAPO (Decoupled Clip and Dynamic sAmpling Policy Optimization) extends
+    GRPO with: Clip-Higher, token-level loss, dynamic sampling, no KL.
+    """
 
     model_name: str
     output_dir: str
@@ -58,13 +69,16 @@ class GRPORunConfig:
     per_device_batch_size: int = 2
     gradient_accumulation_steps: int = 4
     warmup_ratio: float = 0.1
-    kl_coef: float = 0.04
-    clip_range: float = 0.2
+    clip_ratio_low: float = 0.2
+    clip_ratio_high: float = 0.28
+    dynamic_sampling: bool = True
+    overlong_penalty: float = 1.0
+    overlong_buffer_len: int = 128
     max_grad_norm: float = 0.5
     logging_steps: int = 10
     save_steps: int = 100
     eval_steps: int = 50
-    max_completion_length: int = 256
+    max_completion_length: int = 32
     max_prompt_length: int = 1024
     seed: int = 42
     sglang_url: str | None = None
@@ -78,8 +92,9 @@ def build_training_dataset(
     vote_history: list[dict],
     tokenizer=None,
 ) -> Dataset:
-    """Convert code review samples into a GRPO-ready dataset.
+    """Convert code review samples into a training-ready dataset.
 
+    Uses simplified training prompt (model just outputs a score number).
     Each row has:
       - prompt: formatted text prompt
       - label: ground truth (for reward computation)
@@ -87,7 +102,7 @@ def build_training_dataset(
     """
     records = []
     for s in samples:
-        prompt = format_prompt_text(
+        prompt = format_training_prompt_text(
             diff=s["diff"] if isinstance(s, dict) else s.diff,
             comment=s["comment"] if isinstance(s, dict) else s.comment,
             team_name=team_name,
@@ -135,7 +150,7 @@ def _sglang_generate_one(args: tuple) -> str:
             "prompt": prompt_text,
             "max_tokens": max_tokens,
             "temperature": temperature,
-            "top_p": 0.9,
+            "top_p": 0.95,
         },
         timeout=120,
     )
@@ -149,14 +164,15 @@ def rollout_sglang(
     sglang_url: str,
     model_name: str,
     tokenizer,
-    max_tokens: int = 256,
-    temperature: float = 0.8,
+    max_tokens: int = 32,
+    temperature: float = 1.2,
     max_workers: int = 16,
     max_prompt_length: int = 1024,
 ) -> tuple[list[list[list[dict]]], list[torch.Tensor], list[list[torch.Tensor]]]:
-    """Generate completions for all prompts × group_size via SGLang.
+    """Generate completions for all prompts x group_size via SGLang.
 
-    Sends concurrent requests — SGLang's continuous batching handles the rest.
+    Sends concurrent requests -- SGLang's continuous batching handles the rest.
+    Temperature 1.2 for high diversity (DAPO benefits from exploration).
     Returns (completions_text, prompt_ids, gen_ids_per_prompt).
     """
     tasks = []
@@ -205,7 +221,7 @@ def rollout_local(
     model,
     tokenizer,
     device,
-    max_tokens: int = 256,
+    max_tokens: int = 32,
     max_prompt_length: int = 1024,
 ) -> tuple[list[list[list[dict]]], list[torch.Tensor], list[list[torch.Tensor]]]:
     """Fallback: generate completions with the local model (sequential, slower)."""
@@ -226,8 +242,8 @@ def rollout_local(
                 outputs = model.generate(
                     **prompt_enc,
                     max_new_tokens=max_tokens,
-                    temperature=0.8,
-                    top_p=0.9,
+                    temperature=1.2,
+                    top_p=0.95,
                     do_sample=True,
                     return_dict_in_generate=True,
                     pad_token_id=tokenizer.pad_token_id,
@@ -248,11 +264,17 @@ def rollout_local(
 # ---------------------------------------------------------------------------
 
 class RLCRTrainer:
-    """Orchestrates GRPO training for code review scoring.
+    """Orchestrates DAPO training for code review scoring.
 
     Supports two modes:
       1. Single-team training: Train a LoRA adapter for one team
       2. Multi-team training via Ray: Parallel training across all teams
+
+    DAPO techniques applied in the custom loop:
+      - Clip-Higher: asymmetric clipping for importance ratios
+      - Token-level loss: normalize by total active tokens across the batch
+      - Dynamic sampling: skip groups with zero reward variance
+      - No KL penalty
 
     Rollout generation uses SGLang by default (fast concurrent batched
     inference). Falls back to local model.generate() if SGLang is unavailable.
@@ -266,7 +288,7 @@ class RLCRTrainer:
 
     def setup(self):
         """Load model, apply LoRA, and prepare for training."""
-        logger.info(f"Setting up GRPO trainer for team: {self.config.team_name}")
+        logger.info(f"Setting up DAPO trainer for team: {self.config.team_name}")
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.model_name, trust_remote_code=True
@@ -297,27 +319,27 @@ class RLCRTrainer:
         logger.info(f"Trainable parameters: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
 
     def train(self, train_dataset: Dataset, eval_dataset: Dataset | None = None) -> dict:
-        """Run GRPO training.
+        """Run DAPO training.
 
-        Attempts to use TRL's GRPOTrainer if available, otherwise falls back
-        to a custom training loop.
+        Attempts to use TRL's GRPOTrainer (with loss_type='dapo') if available,
+        otherwise falls back to a custom training loop.
         """
         self.setup()
 
         try:
             return self._train_with_trl(train_dataset, eval_dataset)
         except (ImportError, Exception) as e:
-            logger.warning(f"TRL GRPOTrainer not available ({e}), using custom loop")
+            logger.warning(f"TRL GRPOTrainer not available ({e}), using custom DAPO loop")
             return self._train_custom(train_dataset, eval_dataset)
 
     def _train_with_trl(self, train_dataset: Dataset, eval_dataset: Dataset | None) -> dict:
-        """Train using TRL's GRPOTrainer."""
+        """Train using TRL's GRPOTrainer with DAPO loss type."""
         from trl import GRPOTrainer, GRPOConfig
 
         reward_fn = CodeReviewReward(
-            correctness_weight=1.0,
-            calibration_weight=0.3,
-            format_weight=0.2,
+            overlong_penalty=self.config.overlong_penalty,
+            overlong_buffer_len=self.config.overlong_buffer_len,
+            max_completion_length=self.config.max_completion_length,
         )
 
         trl_kwargs = dict(
@@ -333,7 +355,9 @@ class RLCRTrainer:
             num_generations=self.config.group_size,
             max_completion_length=self.config.max_completion_length,
             max_prompt_length=self.config.max_prompt_length,
-            kl_coef=self.config.kl_coef,
+            loss_type="dapo",
+            beta=0.0,
+            epsilon_high=self.config.clip_ratio_high,
             seed=self.config.seed,
             bf16=torch.cuda.is_available(),
             report_to="none",
@@ -351,14 +375,14 @@ class RLCRTrainer:
 
         self.trainer = GRPOTrainer(
             model=self.model,
-            reward_funcs=[reward_fn, format_reward],
+            reward_funcs=[reward_fn],
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             processing_class=self.tokenizer,
         )
 
-        logger.info("Starting GRPO training with TRL...")
+        logger.info("Starting DAPO training with TRL (loss_type='dapo')...")
         result = self.trainer.train()
 
         self.trainer.save_model(self.config.output_dir)
@@ -372,25 +396,29 @@ class RLCRTrainer:
         }
 
     def _train_custom(self, train_dataset: Dataset, eval_dataset: Dataset | None) -> dict:
-        """Custom GRPO training loop with SGLang-accelerated rollouts.
+        """Custom DAPO training loop with SGLang-accelerated rollouts.
 
-        Phase 1 — Rollout generation (SGLang or local fallback):
-          Send all prompt × group_size requests concurrently to SGLang.
-          SGLang's continuous batching + KV-cache reuse makes this fast.
-          No gradients needed — just text completions.
+        Phase 1 -- Rollout generation (SGLang or local fallback):
+          Send all prompt x group_size requests concurrently to SGLang.
 
-        Phase 2 — Reward computation:
+        Phase 2 -- Reward computation + dynamic sampling:
           Parse scores/decisions from completion text, compare to labels.
+          Skip groups where all rewards are identical (zero variance).
 
-        Phase 3 — Policy gradient (local model with gradients):
+        Phase 3 -- Token-level policy gradient (DAPO):
           Forward pass through the LoRA model on (prompt + completion).
-          Extract differentiable log-probs, multiply by advantages, backprop.
+          Accumulate weighted token-level losses across the entire batch,
+          then normalize by total active tokens (not per-sequence avg).
         """
         from torch.optim import AdamW
         from transformers import get_linear_schedule_with_warmup
 
         device = next(self.model.parameters()).device
-        reward_fn = CodeReviewReward()
+        reward_fn = CodeReviewReward(
+            overlong_penalty=self.config.overlong_penalty,
+            overlong_buffer_len=self.config.overlong_buffer_len,
+            max_completion_length=self.config.max_completion_length,
+        )
         optimizer = AdamW(
             [p for p in self.model.parameters() if p.requires_grad],
             lr=self.config.learning_rate,
@@ -419,11 +447,17 @@ class RLCRTrainer:
         else:
             logger.info("Rollout generation via local model (no SGLang)")
 
-        logger.info(f"Custom GRPO training: {total_steps} steps, {self.config.num_epochs} epochs")
+        logger.info(
+            f"Custom DAPO training: {total_steps} steps, {self.config.num_epochs} epochs | "
+            f"clip_low={self.config.clip_ratio_low}, clip_high={self.config.clip_ratio_high}, "
+            f"dynamic_sampling={self.config.dynamic_sampling}"
+        )
 
         global_step = 0
         total_reward = 0.0
         best_reward = float("-inf")
+        total_groups_skipped = 0
+        total_groups_seen = 0
         optimizer.zero_grad()
 
         for epoch in range(self.config.num_epochs):
@@ -463,25 +497,36 @@ class RLCRTrainer:
                         max_prompt_length=self.config.max_prompt_length,
                     )
 
-                # Phase 2: Compute rewards from completion text
+                # Phase 2: Compute rewards + dynamic sampling filter
                 batch_rewards = []
+                active_mask = []
                 for group_comps, lbl in zip(all_completions, labels):
                     group_rewards = reward_fn(
                         group_comps, label=[lbl] * len(group_comps)
                     )
                     batch_rewards.append(group_rewards)
+                    total_groups_seen += 1
 
-                # Phase 3: Per-completion forward + backward (memory-efficient)
-                # Each completion gets its own forward pass → loss → backward.
-                # Activations are freed after each backward, so only one
-                # completion's activations live on GPU at a time.
-                n_total = len(all_prompt_ids) * self.config.group_size
-                scale = 1.0 / (n_total * self.config.gradient_accumulation_steps)
+                    reward_std = torch.tensor(group_rewards).std().item()
+                    if self.config.dynamic_sampling and reward_std < 1e-8:
+                        active_mask.append(False)
+                        total_groups_skipped += 1
+                    else:
+                        active_mask.append(True)
+
+                # Phase 3: DAPO token-level policy gradient
+                # Accumulate token losses across batch, normalize by total
+                # active tokens at the end (not per-sequence averaging).
+                total_active_tokens = 0
+                accumulated_loss = 0.0
                 step_loss = 0.0
 
                 for i, (prompt_ids_cpu, group_gen_ids, group_rewards) in enumerate(
                     zip(all_prompt_ids, all_gen_ids, batch_rewards)
                 ):
+                    if not active_mask[i]:
+                        continue
+
                     prompt_ids = prompt_ids_cpu.to(device)
                     rewards_t = torch.tensor(group_rewards, dtype=torch.float32, device=device)
                     mean_r = rewards_t.mean()
@@ -492,6 +537,9 @@ class RLCRTrainer:
                     for j, gen_ids in enumerate(group_gen_ids):
                         if gen_ids.numel() == 0:
                             continue
+
+                        n_tokens = gen_ids.numel()
+                        total_active_tokens += n_tokens
 
                         full_ids = torch.cat([prompt_ids, gen_ids.to(device)]).unsqueeze(0)
                         attention_mask = torch.ones_like(full_ids)
@@ -512,11 +560,20 @@ class RLCRTrainer:
                         token_log_probs = log_probs.gather(
                             1, gen_targets.unsqueeze(1)
                         ).squeeze(1)
-                        avg_log_prob = token_log_probs.mean()
 
-                        comp_loss = -(advantages[j] * avg_log_prob) * scale
-                        comp_loss.backward()
-                        step_loss += comp_loss.item()
+                        # Token-level loss: sum (not mean) weighted by advantage.
+                        # Final normalization happens after all tokens are accumulated.
+                        token_losses = -(advantages[j] * token_log_probs).sum()
+                        token_losses.backward()
+                        step_loss += token_losses.item()
+
+                # Normalize gradients by total active tokens (DAPO token-level normalization)
+                if total_active_tokens > 0:
+                    norm_factor = 1.0 / (total_active_tokens * self.config.gradient_accumulation_steps)
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            p.grad.mul_(norm_factor)
+                    step_loss *= norm_factor
 
                 if (global_step + 1) % self.config.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -531,11 +588,14 @@ class RLCRTrainer:
 
                 log_every = min(self.config.logging_steps, max(total_steps // 3, 1))
                 if global_step % log_every == 0 or global_step == total_steps:
-                    avg_reward = total_reward / max(global_step % log_every or log_every, 1) / max(len(prompts), 1)
+                    n_active = sum(active_mask)
+                    frac_skipped = total_groups_skipped / max(total_groups_seen, 1)
+                    avg_reward = total_reward / max(n_active, 1)
                     logger.info(
                         f"  Step {global_step}/{total_steps} | "
                         f"Loss: {step_loss:.4f} | "
                         f"Reward: {avg_reward:.3f} | "
+                        f"Skipped: {frac_skipped:.1%} | "
                         f"LR: {scheduler.get_last_lr()[0]:.2e}"
                     )
                     if avg_reward > best_reward:
@@ -553,7 +613,11 @@ class RLCRTrainer:
         final_path.mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(str(final_path))
         self.tokenizer.save_pretrained(str(final_path))
-        logger.success(f"Training complete. Best reward: {best_reward:.3f}")
+        frac_skipped = total_groups_skipped / max(total_groups_seen, 1)
+        logger.success(
+            f"DAPO training complete. Best reward: {best_reward:.3f} | "
+            f"Dynamic sampling skipped: {frac_skipped:.1%} of groups"
+        )
 
         return {
             "best_reward": best_reward,
@@ -571,10 +635,10 @@ def train_all_teams(
     teams: dict,
     config_dict: dict,
 ) -> dict[str, dict]:
-    """Train all teams on a single GPU. Loads the base model ONCE.
+    """Train all teams on a single GPU with DAPO. Loads the base model ONCE.
 
-    For each team: attach fresh LoRA → train → save adapter → unload LoRA.
-    Base model stays resident — zero redundant loads, minimal GPU churn.
+    For each team: attach fresh LoRA -> train -> save adapter -> unload LoRA.
+    Base model stays resident -- zero redundant loads, minimal GPU churn.
     """
     model_name = config_dict["model_name"]
     logger.info(f"Loading base model once: {model_name}")
@@ -636,6 +700,11 @@ def train_all_teams(
             num_epochs=config_dict.get("num_epochs", 3),
             per_device_batch_size=config_dict.get("per_device_batch_size", 2),
             gradient_accumulation_steps=config_dict.get("gradient_accumulation_steps", 4),
+            clip_ratio_low=config_dict.get("clip_ratio_low", 0.2),
+            clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
+            dynamic_sampling=config_dict.get("dynamic_sampling", True),
+            overlong_penalty=config_dict.get("overlong_penalty", 1.0),
+            overlong_buffer_len=config_dict.get("overlong_buffer_len", 128),
             seed=config_dict.get("seed", 42),
             sglang_url=sglang_url,
             sglang_concurrent=config_dict.get("sglang_concurrent", 16),
@@ -653,7 +722,6 @@ def train_all_teams(
             logger.error(f"Team {team_name} failed: {e}")
             results[team_name] = {"error": str(e)}
 
-        # Strip LoRA, recover clean base model for next team
         try:
             base_model = peft_model.unload()
         except Exception:
@@ -680,7 +748,7 @@ def train_team_worker(
     eval_samples: list[dict] | None,
     config_dict: dict,
 ) -> dict:
-    """Ray-compatible worker function for per-team training."""
+    """Ray-compatible worker function for per-team DAPO training."""
     run_config = GRPORunConfig(
         model_name=config_dict["model_name"],
         output_dir=os.path.join(config_dict["base_output_dir"], team_name),
@@ -695,6 +763,11 @@ def train_team_worker(
         num_epochs=config_dict.get("num_epochs", 3),
         per_device_batch_size=config_dict.get("per_device_batch_size", 2),
         gradient_accumulation_steps=config_dict.get("gradient_accumulation_steps", 4),
+        clip_ratio_low=config_dict.get("clip_ratio_low", 0.2),
+        clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
+        dynamic_sampling=config_dict.get("dynamic_sampling", True),
+        overlong_penalty=config_dict.get("overlong_penalty", 1.0),
+        overlong_buffer_len=config_dict.get("overlong_buffer_len", 128),
         seed=config_dict.get("seed", 42),
         sglang_url=config_dict.get("sglang_url"),
         sglang_concurrent=config_dict.get("sglang_concurrent", 16),
@@ -725,7 +798,7 @@ def train_all_teams_ray(
     num_cpus: int = 4,
     num_gpus: int = 1,
 ) -> dict[str, dict]:
-    """Multi-GPU parallel training via Ray. Each worker gets 1 full GPU."""
+    """Multi-GPU parallel DAPO training via Ray. Each worker gets 1 full GPU."""
     import ray
 
     if not ray.is_initialized():

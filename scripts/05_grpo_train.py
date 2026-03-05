@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Step 5: GRPO Training Loop.
+"""Step 5: DAPO Training Loop.
 
-Trains per-team scoring policies using Group Relative Policy Optimization:
-  - Reward = address rate from CodeReviewer labels
+Trains per-team scoring policies using DAPO (Decoupled Clip and Dynamic
+sAmpling Policy Optimization):
+  - Reward = address rate from real code review labels
   - LoRA adapters for memory efficiency
+  - Clip-Higher, token-level loss, dynamic sampling, no KL penalty
   - Loads base model once, swaps LoRA per team (efficient single-GPU default)
   - Optional: --ray for multi-GPU parallel training
 
@@ -44,7 +46,7 @@ console = Console()
 
 
 def train_single_team(team_name: str, team, model_name: str, sglang_url: str | None, cfg, tokenizer):
-    """Train GRPO on a single team (standalone, loads its own model)."""
+    """Train DAPO on a single team (standalone, loads its own model)."""
     console.print(f"\n[bold cyan]Training team: {team_name}[/bold cyan]")
 
     train_dicts = [s.to_dict() for s in team.train_samples]
@@ -57,9 +59,10 @@ def train_single_team(team_name: str, team, model_name: str, sglang_url: str | N
         eval_dicts, team_name, team.description, team.vote_history, tokenizer
     )
 
+    dapo = cfg.training.dapo
     run_config = GRPORunConfig(
         model_name=model_name,
-        output_dir=f"outputs/grpo/{team_name}",
+        output_dir=f"outputs/dapo/{team_name}",
         team_name=team_name,
         team_description=team.description,
         vote_history=team.vote_history,
@@ -67,18 +70,21 @@ def train_single_team(team_name: str, team, model_name: str, sglang_url: str | N
         lora_alpha=cfg.training.lora.alpha,
         lora_dropout=cfg.training.lora.dropout,
         lora_target_modules=list(cfg.training.lora.target_modules),
-        group_size=cfg.training.grpo.group_size,
-        learning_rate=cfg.training.grpo.learning_rate,
-        num_epochs=cfg.training.grpo.num_epochs,
-        per_device_batch_size=cfg.training.grpo.per_device_batch_size,
-        gradient_accumulation_steps=cfg.training.grpo.gradient_accumulation_steps,
-        warmup_ratio=cfg.training.grpo.warmup_ratio,
-        kl_coef=cfg.training.grpo.kl_coef,
-        clip_range=cfg.training.grpo.clip_range,
-        max_grad_norm=cfg.training.grpo.max_grad_norm,
-        logging_steps=cfg.training.grpo.logging_steps,
-        save_steps=cfg.training.grpo.save_steps,
-        eval_steps=cfg.training.grpo.eval_steps,
+        group_size=dapo.group_size,
+        learning_rate=dapo.learning_rate,
+        num_epochs=dapo.num_epochs,
+        per_device_batch_size=dapo.per_device_batch_size,
+        gradient_accumulation_steps=dapo.gradient_accumulation_steps,
+        warmup_ratio=dapo.warmup_ratio,
+        clip_ratio_low=dapo.clip_ratio_low,
+        clip_ratio_high=dapo.clip_ratio_high,
+        dynamic_sampling=dapo.dynamic_sampling,
+        overlong_penalty=dapo.overlong_penalty,
+        overlong_buffer_len=dapo.overlong_buffer_len,
+        max_grad_norm=dapo.max_grad_norm,
+        logging_steps=dapo.logging_steps,
+        save_steps=dapo.save_steps,
+        eval_steps=dapo.eval_steps,
         seed=cfg.project.seed,
         sglang_url=sglang_url,
     )
@@ -90,25 +96,31 @@ def train_single_team(team_name: str, team, model_name: str, sglang_url: str | N
 
 def _build_config_dict(model_name: str, sglang_url: str | None, cfg) -> dict:
     """Build config dict for train_all_teams / train_all_teams_ray."""
+    dapo = cfg.training.dapo
     return {
         "model_name": model_name,
-        "base_output_dir": "outputs/grpo",
+        "base_output_dir": "outputs/dapo",
         "lora_r": cfg.training.lora.r,
         "lora_alpha": cfg.training.lora.alpha,
         "lora_dropout": cfg.training.lora.dropout,
         "lora_target_modules": list(cfg.training.lora.target_modules),
-        "group_size": cfg.training.grpo.group_size,
-        "learning_rate": cfg.training.grpo.learning_rate,
-        "num_epochs": cfg.training.grpo.num_epochs,
-        "per_device_batch_size": cfg.training.grpo.per_device_batch_size,
-        "gradient_accumulation_steps": cfg.training.grpo.gradient_accumulation_steps,
+        "group_size": dapo.group_size,
+        "learning_rate": dapo.learning_rate,
+        "num_epochs": dapo.num_epochs,
+        "per_device_batch_size": dapo.per_device_batch_size,
+        "gradient_accumulation_steps": dapo.gradient_accumulation_steps,
+        "clip_ratio_low": dapo.clip_ratio_low,
+        "clip_ratio_high": dapo.clip_ratio_high,
+        "dynamic_sampling": dapo.dynamic_sampling,
+        "overlong_penalty": dapo.overlong_penalty,
+        "overlong_buffer_len": dapo.overlong_buffer_len,
         "seed": cfg.project.seed,
         "sglang_url": sglang_url,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GRPO training")
+    parser = argparse.ArgumentParser(description="DAPO training")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--team", default=None, help="Train specific team only")
     parser.add_argument("--ray", action="store_true", help="Multi-GPU parallel training via Ray")
@@ -124,7 +136,7 @@ def main():
     if cfg.model.sglang.get("enabled", True):
         sglang_url = f"http://{cfg.model.sglang.host}:{cfg.model.sglang.port}"
 
-    console.rule("[bold blue]Step 5: GRPO Training[/bold blue]")
+    console.rule("[bold blue]Step 5: DAPO Training[/bold blue]")
 
     teams_dir = Path(cfg.data.processed_dir) / "teams"
     if not teams_dir.exists():
@@ -134,11 +146,14 @@ def main():
     team_configs = list(cfg.teams.types)
     simulator = TeamSimulator.load(teams_dir, team_configs)
 
+    dapo = cfg.training.dapo
     mode = "Ray (multi-GPU)" if args.ray else "single-GPU (model loaded once, LoRA swapped per team)"
     console.print(f"Model: {model_name}")
-    console.print(f"Method: GRPO with LoRA (r={cfg.training.lora.r})")
-    console.print(f"Group size: {cfg.training.grpo.group_size}")
-    console.print(f"Epochs: {cfg.training.grpo.num_epochs}")
+    console.print(f"Method: DAPO with LoRA (r={cfg.training.lora.r})")
+    console.print(f"Group size: {dapo.group_size}")
+    console.print(f"Clip-Higher: low={dapo.clip_ratio_low}, high={dapo.clip_ratio_high}")
+    console.print(f"Dynamic sampling: {dapo.dynamic_sampling}")
+    console.print(f"Epochs: {dapo.num_epochs}")
     console.print(f"Training mode: {mode}")
     console.print(f"Rollout generation: {'SGLang' if sglang_url else 'local model'}")
 

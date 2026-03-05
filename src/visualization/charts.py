@@ -77,7 +77,7 @@ class RLCRVisualizer:
             stds = np.array(data["stds"])
 
             color = self.rl_color if method == "rl" else self.baseline_color
-            label = "GRPO (Ours)" if method == "rl" else "Embedding Baseline"
+            label = "DAPO (Ours)" if method == "rl" else "Embedding Baseline"
             marker = "o" if method == "rl" else "s"
 
             ax.plot(steps, means, color=color, marker=marker, linewidth=2.5,
@@ -144,7 +144,7 @@ class RLCRVisualizer:
 
                 if method == "rl":
                     ax.plot(steps, means, color=self.rl_color, marker="o",
-                            linewidth=2, markersize=5, label="GRPO")
+                            linewidth=2, markersize=5, label="DAPO")
                     ax.fill_between(steps, means - stds, means + stds,
                                     alpha=0.15, color=self.rl_color)
                 else:
@@ -230,7 +230,7 @@ class RLCRVisualizer:
         bl_vals = [baseline_metrics[t].get(metric, 0) for t in teams]
 
         fig, ax = plt.subplots(figsize=self.figsize)
-        bars1 = ax.bar(x - width / 2, rl_vals, width, label="GRPO (Ours)",
+        bars1 = ax.bar(x - width / 2, rl_vals, width, label="DAPO (Ours)",
                        color=self.rl_color, alpha=0.85, edgecolor="white", linewidth=0.5)
         bars2 = ax.bar(x + width / 2, bl_vals, width, label="Embedding Baseline",
                        color=self.baseline_color, alpha=0.85, edgecolor="white", linewidth=0.5)
@@ -247,7 +247,7 @@ class RLCRVisualizer:
                 )
 
         ax.set_ylabel(f"{metric.upper()} Score", fontsize=13)
-        ax.set_title(f"Head-to-Head: GRPO vs Embedding Baseline ({metric.upper()})",
+        ax.set_title(f"Head-to-Head: DAPO vs Embedding Baseline ({metric.upper()})",
                      fontsize=14, fontweight="bold")
         ax.set_xticks(x)
         ax.set_xticklabels([t.title() for t in teams], fontsize=11)
@@ -280,7 +280,7 @@ class RLCRVisualizer:
             label = ex.get("label", -1)
 
             ax.barh(i + height / 2, rl_score, height, color=self.rl_color,
-                    alpha=0.85, label="GRPO" if i == 0 else "")
+                    alpha=0.85, label="DAPO" if i == 0 else "")
             ax.barh(i - height / 2, bl_score, height, color=self.baseline_color,
                     alpha=0.85, label="Embedding" if i == 0 else "")
 
@@ -308,7 +308,7 @@ class RLCRVisualizer:
             mpatches.Patch(facecolor="#FFEBEE", label="Ignored (ground truth)"),
         ]
         ax.legend(handles=legend_elements + ax.get_legend_handles_labels()[0][:2],
-                  labels=["Addressed", "Ignored", "GRPO", "Embedding"],
+                  labels=["Addressed", "Ignored", "DAPO", "Embedding"],
                   fontsize=9, loc="lower right")
 
         plt.tight_layout()

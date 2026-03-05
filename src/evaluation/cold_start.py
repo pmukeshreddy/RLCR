@@ -4,7 +4,7 @@ This is THE key evaluation for the paper. It measures:
   - Performance at 0, 5, 10, 20, 50, 100 training samples
   - Per-team breakdown
   - Multiple seeds for statistical significance
-  - Comparison between RL (GRPO) and embedding baseline
+  - Comparison between RL (DAPO) and embedding baseline
 
 The cold-start curve is the killer chart that shows RL adapts faster
 than cosine-similarity filtering with limited feedback.
@@ -114,7 +114,7 @@ class ColdStartEvaluator:
 
         For each step N and each seed:
           1. Take N random training samples
-          2. Fine-tune the model with GRPO on those N samples
+          2. Fine-tune the model with DAPO on those N samples
              (or use a pre-trained model at the corresponding checkpoint)
           3. Evaluate on the full test set
         """
