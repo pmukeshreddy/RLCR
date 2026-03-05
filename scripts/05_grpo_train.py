@@ -74,7 +74,7 @@ def train_single_team(team_name: str, team, model_name: str, sglang_url: str | N
         learning_rate=dapo.learning_rate,
         num_epochs=dapo.num_epochs,
         per_device_batch_size=dapo.per_device_batch_size,
-        gradient_accumulation_steps=dapo.gradient_accumulation_steps,
+        ppo_epochs=dapo.ppo_epochs,
         warmup_ratio=dapo.warmup_ratio,
         clip_ratio_low=dapo.clip_ratio_low,
         clip_ratio_high=dapo.clip_ratio_high,
@@ -108,7 +108,7 @@ def _build_config_dict(model_name: str, sglang_url: str | None, cfg) -> dict:
         "learning_rate": dapo.learning_rate,
         "num_epochs": dapo.num_epochs,
         "per_device_batch_size": dapo.per_device_batch_size,
-        "gradient_accumulation_steps": dapo.gradient_accumulation_steps,
+        "ppo_epochs": dapo.ppo_epochs,
         "clip_ratio_low": dapo.clip_ratio_low,
         "clip_ratio_high": dapo.clip_ratio_high,
         "dynamic_sampling": dapo.dynamic_sampling,
@@ -152,6 +152,7 @@ def main():
     console.print(f"Method: DAPO with LoRA (r={cfg.training.lora.r})")
     console.print(f"Group size: {dapo.group_size}")
     console.print(f"Clip-Higher: low={dapo.clip_ratio_low}, high={dapo.clip_ratio_high}")
+    console.print(f"PPO inner epochs: {dapo.ppo_epochs}")
     console.print(f"Dynamic sampling: {dapo.dynamic_sampling}")
     console.print(f"Epochs: {dapo.num_epochs}")
     console.print(f"Training mode: {mode}")

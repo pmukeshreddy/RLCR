@@ -67,7 +67,8 @@ class GRPORunConfig:
     learning_rate: float = 5e-6
     num_epochs: int = 3
     per_device_batch_size: int = 4
-    gradient_accumulation_steps: int = 2
+    gradient_accumulation_steps: int = 1  # only used by TRL path
+    ppo_epochs: int = 2  # inner optimization steps per rollout batch (custom loop)
     warmup_ratio: float = 0.1
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.28
@@ -401,19 +402,29 @@ class RLCRTrainer:
         }
 
     def _train_custom(self, train_dataset: Dataset, eval_dataset: Dataset | None) -> dict:
-        """Custom DAPO training loop with SGLang-accelerated rollouts.
+        """Custom DAPO training loop with proper importance ratio + clipping.
 
         Phase 1 -- Rollout generation (SGLang or local fallback):
-          Send all prompt x group_size requests concurrently to SGLang.
+          Generate group_size completions per prompt.
 
         Phase 2 -- Reward computation + dynamic sampling:
-          Parse scores/decisions from completion text, compare to labels.
-          Skip groups where all rewards are identical (zero variance).
+          Binary reward (+1/-1). Skip groups with zero reward variance.
 
-        Phase 3 -- Token-level policy gradient (DAPO):
-          Forward pass through the LoRA model on (prompt + completion).
-          Accumulate weighted token-level losses across the entire batch,
-          then normalize by total active tokens (not per-sequence avg).
+        Phase 3 -- Old log-probs (no_grad batched forward pass):
+          Compute token-level log-probs under the CURRENT policy before
+          any updates. These serve as the reference for importance ratios.
+
+        Phase 4 -- PPO inner loop with DAPO Clip-Higher:
+          For ppo_epochs iterations on the SAME rollouts:
+            - Forward pass → new token log-probs
+            - ratio = exp(new_lp - old_lp)
+            - Asymmetric clip: clamp(ratio, 1-ε_low, 1+ε_high)
+            - loss = -min(ratio·A, clipped_ratio·A)  (token-level, summed)
+            - Normalize by total active tokens
+            - backward → clip_grad → optimizer.step()
+
+          ε_high > ε_low allows the policy to increase probability of
+          good actions more aggressively than it decreases bad ones.
         """
         from torch.optim import AdamW
         from transformers import get_linear_schedule_with_warmup
@@ -428,16 +439,13 @@ class RLCRTrainer:
             [p for p in self.model.parameters() if p.requires_grad],
             lr=self.config.learning_rate,
         )
-        total_steps = (
-            len(train_dataset)
-            // self.config.per_device_batch_size
-            * self.config.num_epochs
-            // self.config.gradient_accumulation_steps
-        )
+
+        batches_per_epoch = max(len(train_dataset) // self.config.per_device_batch_size, 1)
+        total_optim_steps = batches_per_epoch * self.config.num_epochs * self.config.ppo_epochs
         scheduler = get_linear_schedule_with_warmup(
             optimizer,
-            num_warmup_steps=int(total_steps * self.config.warmup_ratio),
-            num_training_steps=total_steps,
+            num_warmup_steps=int(total_optim_steps * self.config.warmup_ratio),
+            num_training_steps=total_optim_steps,
         )
 
         use_sglang = (
@@ -446,24 +454,29 @@ class RLCRTrainer:
         )
         if use_sglang:
             logger.info(
-                f"Rollout generation via SGLang at {self.config.sglang_url} "
+                f"Rollout via SGLang at {self.config.sglang_url} "
                 f"(concurrency={self.config.sglang_concurrent})"
             )
         else:
-            logger.info("Rollout generation via local model (no SGLang)")
+            logger.info("Rollout via local model (no SGLang)")
 
+        eps_low = self.config.clip_ratio_low
+        eps_high = self.config.clip_ratio_high
+        total_batches = batches_per_epoch * self.config.num_epochs
         logger.info(
-            f"Custom DAPO training: {total_steps} steps, {self.config.num_epochs} epochs | "
-            f"clip_low={self.config.clip_ratio_low}, clip_high={self.config.clip_ratio_high}, "
+            f"DAPO training: {total_batches} batches × {self.config.ppo_epochs} PPO epochs "
+            f"= {total_optim_steps} optimizer steps | "
+            f"clip=[{1-eps_low:.2f}, {1+eps_high:.2f}], "
             f"dynamic_sampling={self.config.dynamic_sampling}"
         )
 
+        optim_step = 0
         global_step = 0
         total_reward = 0.0
         best_reward = float("-inf")
         total_groups_skipped = 0
         total_groups_seen = 0
-        optimizer.zero_grad()
+        n_reward_samples = 0
 
         for epoch in range(self.config.num_epochs):
             self.model.train()
@@ -502,7 +515,7 @@ class RLCRTrainer:
                         max_prompt_length=self.config.max_prompt_length,
                     )
 
-                # Phase 2: Compute rewards + dynamic sampling filter
+                # Phase 2: Rewards + dynamic sampling filter
                 batch_rewards = []
                 active_mask = []
                 for group_comps, lbl in zip(all_completions, labels):
@@ -519,9 +532,7 @@ class RLCRTrainer:
                     else:
                         active_mask.append(True)
 
-                # Phase 3: DAPO token-level policy gradient (BATCHED)
-                # Collect all active completions, pad into one batch, single
-                # forward pass, then compute token-level losses from the logits.
+                # Collect active sequences + advantages
                 sequences = []
                 for i, (prompt_ids_cpu, group_gen_ids, group_rewards) in enumerate(
                     zip(all_prompt_ids, all_gen_ids, batch_rewards)
@@ -532,8 +543,9 @@ class RLCRTrainer:
                     rewards_t = torch.tensor(group_rewards, dtype=torch.float32)
                     mean_r = rewards_t.mean()
                     std_r = rewards_t.std() + 1e-8
-                    advantages = ((rewards_t - mean_r) / std_r)
+                    advantages = (rewards_t - mean_r) / std_r
                     total_reward += mean_r.item()
+                    n_reward_samples += 1
 
                     for j, gen_ids in enumerate(group_gen_ids):
                         if gen_ids.numel() == 0:
@@ -546,76 +558,116 @@ class RLCRTrainer:
                             "advantage": advantages[j].item(),
                         })
 
+                global_step += 1
+
+                if not sequences:
+                    continue
+
+                # Build padded batch (shared across old_lp + PPO steps)
+                max_len = max(s["full_ids"].shape[0] for s in sequences)
+                n_seqs = len(sequences)
+                pad_id = self.tokenizer.pad_token_id or 0
+
+                batch_ids = torch.full(
+                    (n_seqs, max_len), pad_id, dtype=torch.long, device=device
+                )
+                batch_mask = torch.zeros(
+                    (n_seqs, max_len), dtype=torch.long, device=device
+                )
+                for k, s in enumerate(sequences):
+                    seq_len = s["full_ids"].shape[0]
+                    batch_ids[k, :seq_len] = s["full_ids"].to(device)
+                    batch_mask[k, :seq_len] = 1
+
+                # Phase 3: Compute old log-probs (reference, no gradient)
+                with torch.no_grad():
+                    old_logits = self.model(
+                        input_ids=batch_ids, attention_mask=batch_mask
+                    ).logits
+
+                old_token_lps = []
+                for k, s in enumerate(sequences):
+                    pl, gl = s["prompt_len"], s["gen_len"]
+                    glgts = old_logits[k, pl - 1 : pl - 1 + gl, :]
+                    targets = batch_ids[k, pl : pl + gl]
+                    lp = torch.log_softmax(glgts, dim=-1)
+                    old_token_lps.append(
+                        lp.gather(1, targets.unsqueeze(1)).squeeze(1).detach()
+                    )
+                del old_logits
+
+                # Phase 4: PPO inner loop with DAPO Clip-Higher
                 step_loss = 0.0
-                if sequences:
-                    max_len = max(s["full_ids"].shape[0] for s in sequences)
-                    n_seqs = len(sequences)
-                    pad_id = self.tokenizer.pad_token_id or 0
-
-                    batch_ids = torch.full(
-                        (n_seqs, max_len), pad_id, dtype=torch.long, device=device
-                    )
-                    batch_mask = torch.zeros(
-                        (n_seqs, max_len), dtype=torch.long, device=device
-                    )
-                    for k, s in enumerate(sequences):
-                        seq_len = s["full_ids"].shape[0]
-                        batch_ids[k, :seq_len] = s["full_ids"].to(device)
-                        batch_mask[k, :seq_len] = 1
-
+                for ppo_step in range(self.config.ppo_epochs):
                     logits = self.model(
-                        input_ids=batch_ids,
-                        attention_mask=batch_mask,
+                        input_ids=batch_ids, attention_mask=batch_mask
                     ).logits
 
                     total_loss = torch.tensor(0.0, device=device)
-                    total_active_tokens = 0
+                    total_tokens = 0
+                    clip_frac = 0.0
+                    n_clip_tokens = 0
+
                     for k, s in enumerate(sequences):
-                        pl = s["prompt_len"]
-                        gl = s["gen_len"]
+                        pl, gl = s["prompt_len"], s["gen_len"]
                         gen_logits = logits[k, pl - 1 : pl - 1 + gl, :]
                         gen_targets = batch_ids[k, pl : pl + gl]
-                        log_probs = torch.log_softmax(gen_logits, dim=-1)
-                        token_log_probs = log_probs.gather(
+
+                        new_lp = torch.log_softmax(gen_logits, dim=-1)
+                        new_token_lps = new_lp.gather(
                             1, gen_targets.unsqueeze(1)
                         ).squeeze(1)
-                        total_loss += -(s["advantage"] * token_log_probs).sum()
-                        total_active_tokens += gl
 
-                    if total_active_tokens > 0:
-                        norm = total_active_tokens * self.config.gradient_accumulation_steps
-                        normalized_loss = total_loss / norm
-                        normalized_loss.backward()
-                        step_loss = normalized_loss.item()
+                        ratio = torch.exp(new_token_lps - old_token_lps[k])
+                        clipped_ratio = torch.clamp(
+                            ratio, 1.0 - eps_low, 1.0 + eps_high
+                        )
 
-                    del logits, batch_ids, batch_mask, total_loss
+                        adv = s["advantage"]
+                        surr1 = ratio * adv
+                        surr2 = clipped_ratio * adv
+                        total_loss += -torch.min(surr1, surr2).sum()
+                        total_tokens += gl
 
-                if (global_step + 1) % self.config.gradient_accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in self.model.parameters() if p.requires_grad],
-                        self.config.max_grad_norm,
-                    )
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
+                        with torch.no_grad():
+                            clip_frac += (ratio != clipped_ratio).float().sum().item()
+                            n_clip_tokens += gl
 
-                global_step += 1
+                    if total_tokens > 0:
+                        normalized = total_loss / total_tokens
+                        normalized.backward()
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.model.parameters() if p.requires_grad],
+                            self.config.max_grad_norm,
+                        )
+                        optimizer.step()
+                        scheduler.step()
+                        optimizer.zero_grad()
+                        step_loss = normalized.item()
+                        optim_step += 1
 
-                log_every = min(self.config.logging_steps, max(total_steps // 3, 1))
-                if global_step % log_every == 0 or global_step == total_steps:
-                    n_active = sum(active_mask)
+                    del logits
+
+                del batch_ids, batch_mask, old_token_lps
+
+                log_every = min(self.config.logging_steps, max(total_batches // 3, 1))
+                if global_step % log_every == 0 or global_step == total_batches:
                     frac_skipped = total_groups_skipped / max(total_groups_seen, 1)
-                    avg_reward = total_reward / max(n_active, 1)
+                    avg_reward = total_reward / max(n_reward_samples, 1)
+                    cf = clip_frac / max(n_clip_tokens, 1)
                     logger.info(
-                        f"  Step {global_step}/{total_steps} | "
+                        f"  Batch {global_step}/{total_batches} "
+                        f"(optim {optim_step}/{total_optim_steps}) | "
                         f"Loss: {step_loss:.4f} | "
                         f"Reward: {avg_reward:.3f} | "
-                        f"Skipped: {frac_skipped:.1%} | "
+                        f"Clip%: {cf:.1%} | "
+                        f"Skip%: {frac_skipped:.1%} | "
                         f"LR: {scheduler.get_last_lr()[0]:.2e}"
                     )
                     if avg_reward > best_reward:
                         best_reward = avg_reward
                     total_reward = 0.0
+                    n_reward_samples = 0
 
                 if global_step % self.config.save_steps == 0:
                     save_path = Path(self.config.output_dir) / f"checkpoint-{global_step}"
@@ -713,11 +765,11 @@ def train_all_teams(
             team_name=team_name,
             team_description=team.description,
             vote_history=team.vote_history,
-            group_size=config_dict.get("group_size", 8),
+            group_size=config_dict.get("group_size", 4),
             learning_rate=config_dict.get("learning_rate", 5e-6),
             num_epochs=config_dict.get("num_epochs", 3),
-            per_device_batch_size=config_dict.get("per_device_batch_size", 2),
-            gradient_accumulation_steps=config_dict.get("gradient_accumulation_steps", 4),
+            per_device_batch_size=config_dict.get("per_device_batch_size", 4),
+            ppo_epochs=config_dict.get("ppo_epochs", 2),
             clip_ratio_low=config_dict.get("clip_ratio_low", 0.2),
             clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
             dynamic_sampling=config_dict.get("dynamic_sampling", True),
@@ -776,19 +828,19 @@ def train_team_worker(
         lora_r=config_dict.get("lora_r", 16),
         lora_alpha=config_dict.get("lora_alpha", 32),
         lora_dropout=config_dict.get("lora_dropout", 0.05),
-        group_size=config_dict.get("group_size", 8),
+        group_size=config_dict.get("group_size", 4),
         learning_rate=config_dict.get("learning_rate", 5e-6),
         num_epochs=config_dict.get("num_epochs", 3),
-        per_device_batch_size=config_dict.get("per_device_batch_size", 2),
-        gradient_accumulation_steps=config_dict.get("gradient_accumulation_steps", 4),
+        per_device_batch_size=config_dict.get("per_device_batch_size", 4),
+        ppo_epochs=config_dict.get("ppo_epochs", 2),
         clip_ratio_low=config_dict.get("clip_ratio_low", 0.2),
         clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
         dynamic_sampling=config_dict.get("dynamic_sampling", True),
         overlong_penalty=config_dict.get("overlong_penalty", 1.0),
-        overlong_buffer_len=config_dict.get("overlong_buffer_len", 128),
+        overlong_buffer_len=config_dict.get("overlong_buffer_len", 16),
         seed=config_dict.get("seed", 42),
         sglang_url=config_dict.get("sglang_url"),
-        sglang_concurrent=config_dict.get("sglang_concurrent", 16),
+        sglang_concurrent=config_dict.get("sglang_concurrent", 32),
     )
 
     tokenizer = AutoTokenizer.from_pretrained(

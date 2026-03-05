@@ -226,6 +226,9 @@ fi
 run_step 6 "Evaluation" \
     "python scripts/06_evaluate.py $EVAL_ARGS"
 
+run_step 6b "A/B Split Test" \
+    "python scripts/06b_ab_test.py $EVAL_ARGS"
+
 # =============================================
 # Step 7: Scale to larger model (skip in quick mode)
 # =============================================

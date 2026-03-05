@@ -391,3 +391,77 @@ class RLCRVisualizer:
         table_path.write_text(table)
         logger.info(f"Saved: {table_path}")
         return table
+
+    def plot_ab_test(
+        self,
+        ab_results: dict[str, dict],
+        metric: str = "f1",
+    ) -> Path:
+        """Bar chart of A/B test results with error bars and significance stars.
+
+        Args:
+            ab_results: {team_name: {"metrics": {metric: {rl_mean, baseline_mean, ...}}}}
+        """
+        plt.style.use(self.style if self.style != "seaborn-whitegrid" else "default")
+
+        teams = list(ab_results.keys())
+        x = np.arange(len(teams))
+        width = 0.35
+
+        rl_means = []
+        bl_means = []
+        rl_cis = []
+        bl_cis = []
+        p_values = []
+
+        for t in teams:
+            m = ab_results[t]["metrics"].get(metric, {})
+            rl_means.append(m.get("rl_mean", 0))
+            bl_means.append(m.get("baseline_mean", 0))
+            rl_cis.append(m.get("rl_std", 0))
+            bl_cis.append(m.get("baseline_std", 0))
+            p_values.append(m.get("p_value", 1.0))
+
+        fig, ax = plt.subplots(figsize=self.figsize)
+        bars1 = ax.bar(
+            x - width / 2, rl_means, width,
+            yerr=rl_cis, capsize=4,
+            label="DAPO (Ours)", color=self.rl_color, alpha=0.85,
+            edgecolor="white", linewidth=0.5,
+        )
+        bars2 = ax.bar(
+            x + width / 2, bl_means, width,
+            yerr=bl_cis, capsize=4,
+            label="Embedding Baseline", color=self.baseline_color, alpha=0.85,
+            edgecolor="white", linewidth=0.5,
+        )
+
+        for i, pval in enumerate(p_values):
+            top = max(rl_means[i] + rl_cis[i], bl_means[i] + bl_cis[i])
+            if pval < 0.01:
+                ax.text(x[i], top + 0.02, "**", ha="center", fontsize=14, fontweight="bold")
+            elif pval < 0.05:
+                ax.text(x[i], top + 0.02, "*", ha="center", fontsize=14, fontweight="bold")
+
+        ax.set_ylabel(metric.upper(), fontsize=12)
+        ax.set_title(
+            f"A/B Test: DAPO vs Embedding Baseline ({metric.upper()})",
+            fontsize=14, fontweight="bold", pad=15,
+        )
+        ax.set_xticks(x)
+        ax.set_xticklabels([t.title() for t in teams], fontsize=11)
+        ax.set_ylim(0, min(max(max(rl_means), max(bl_means)) + 0.15, 1.1))
+        ax.legend(fontsize=11, loc="upper right")
+        ax.grid(True, axis="y", alpha=0.3)
+
+        sig_patch = mpatches.Patch(color="none", label="* p<0.05  ** p<0.01")
+        handles, labels = ax.get_legend_handles_labels()
+        handles.append(sig_patch)
+        ax.legend(handles=handles, fontsize=10, loc="upper right")
+
+        plt.tight_layout()
+        path = self.output_dir / f"ab_test_{metric}.png"
+        fig.savefig(path, dpi=self.dpi, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"Saved: {path}")
+        return path

@@ -183,7 +183,18 @@ def main():
     path = viz.plot_example_scores(examples)
     generated.append(str(path))
 
-    # --- 5. Model Comparison ---
+    # --- 5. A/B Test ---
+    ab_path = results_dir / "ab_test_results.json"
+    if ab_path.exists():
+        console.print("\n[cyan]Generating A/B test chart...[/cyan]")
+        with open(ab_path) as f:
+            ab_data = json.load(f)
+        path = viz.plot_ab_test(ab_data, metric="f1")
+        generated.append(str(path))
+    else:
+        console.print("[yellow]No A/B test results found. Run step 06b first.[/yellow]")
+
+    # --- 6. Model Comparison ---
     model_comp_path = results_dir / "model_comparison.json"
     if model_comp_path.exists():
         console.print("\n[cyan]Generating model comparison chart...[/cyan]")
