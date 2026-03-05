@@ -65,22 +65,40 @@ class TeamVectorStore:
         k: int = 5,
         upvote_weight: float = 1.0,
         downvote_weight: float = 0.8,
+        exclude_self: bool = False,
     ) -> float:
-        """Compute weighted similarity score for a query embedding."""
+        """Compute weighted similarity score for a query embedding.
+
+        When exclude_self=True, drops the top result if its similarity > 0.99
+        (likely the query vector itself in the index). Used during threshold
+        tuning to avoid train-on-train leakage.
+        """
         vec = embedding.reshape(1, -1).astype(np.float32)
         faiss.normalize_L2(vec)
 
+        extra = 1 if exclude_self else 0
+
         up_score = 0.0
         if self.n_upvotes > 0:
-            k_up = min(k, self.n_upvotes)
-            distances, _ = self.upvote_index.search(vec, k_up)
-            up_score = float(np.mean(distances[0, :k_up]))
+            k_fetch = min(k + extra, self.n_upvotes)
+            distances, _ = self.upvote_index.search(vec, k_fetch)
+            dists = distances[0, :k_fetch]
+            if exclude_self and len(dists) > 0 and dists[0] > 0.99:
+                dists = dists[1:]
+            dists = dists[:k]
+            if len(dists) > 0:
+                up_score = float(np.mean(dists))
 
         down_score = 0.0
         if self.n_downvotes > 0:
-            k_down = min(k, self.n_downvotes)
-            distances, _ = self.downvote_index.search(vec, k_down)
-            down_score = float(np.mean(distances[0, :k_down]))
+            k_fetch = min(k + extra, self.n_downvotes)
+            distances, _ = self.downvote_index.search(vec, k_fetch)
+            dists = distances[0, :k_fetch]
+            if exclude_self and len(dists) > 0 and dists[0] > 0.99:
+                dists = dists[1:]
+            dists = dists[:k]
+            if len(dists) > 0:
+                down_score = float(np.mean(dists))
 
         return upvote_weight * up_score - downvote_weight * down_score
 
@@ -160,7 +178,10 @@ class EmbeddingFilter:
     ) -> float:
         """Find optimal threshold via grid search on training samples.
 
-        Maximizes F1 score to give the baseline its fairest chance.
+        Uses exclude_self=True so that each training sample's score is
+        computed WITHOUT itself in the FAISS index. This prevents the
+        self-similarity leak (cosine sim = 1.0 to itself) that would
+        give artificially inflated scores and a useless threshold.
         """
         if team_name not in self.stores:
             self.thresholds[team_name] = 0.0
@@ -176,7 +197,11 @@ class EmbeddingFilter:
         embeddings = self._encode(texts)
 
         scores = np.array([
-            store.query(emb, upvote_weight=self.upvote_weight, downvote_weight=self.downvote_weight)
+            store.query(
+                emb, upvote_weight=self.upvote_weight,
+                downvote_weight=self.downvote_weight,
+                exclude_self=True,
+            )
             for emb in embeddings
         ])
 

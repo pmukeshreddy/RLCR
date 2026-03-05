@@ -147,7 +147,11 @@ class DistilledFilter(EmbeddingFilter):
         embeddings = self._encode(texts)
 
         scores = np.array([
-            store.query(emb, upvote_weight=self.upvote_weight, downvote_weight=self.downvote_weight)
+            store.query(
+                emb, upvote_weight=self.upvote_weight,
+                downvote_weight=self.downvote_weight,
+                exclude_self=True,
+            )
             for emb in embeddings
         ])
 
