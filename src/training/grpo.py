@@ -63,26 +63,26 @@ class GRPORunConfig:
     lora_alpha: int = 32
     lora_dropout: float = 0.05
     lora_target_modules: list[str] | None = None
-    group_size: int = 8
+    group_size: int = 4
     learning_rate: float = 5e-6
     num_epochs: int = 3
-    per_device_batch_size: int = 2
-    gradient_accumulation_steps: int = 4
+    per_device_batch_size: int = 4
+    gradient_accumulation_steps: int = 2
     warmup_ratio: float = 0.1
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.28
     dynamic_sampling: bool = True
     overlong_penalty: float = 1.0
-    overlong_buffer_len: int = 128
+    overlong_buffer_len: int = 16
     max_grad_norm: float = 0.5
-    logging_steps: int = 10
-    save_steps: int = 100
-    eval_steps: int = 50
+    logging_steps: int = 5
+    save_steps: int = 50
+    eval_steps: int = 25
     max_completion_length: int = 32
     max_prompt_length: int = 1024
     seed: int = 42
     sglang_url: str | None = None
-    sglang_concurrent: int = 16
+    sglang_concurrent: int = 32
 
 
 def build_training_dataset(
@@ -297,11 +297,16 @@ class RLCRTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-        )
+        load_kwargs = dict(torch_dtype=dtype, trust_remote_code=True)
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name, attn_implementation="flash_attention_2", **load_kwargs
+            )
+            logger.info("Using Flash Attention 2")
+        except (ValueError, ImportError):
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name, **load_kwargs
+            )
         if torch.cuda.is_available():
             self.model.to("cuda")
         self.model.gradient_checkpointing_enable()
@@ -514,66 +519,76 @@ class RLCRTrainer:
                     else:
                         active_mask.append(True)
 
-                # Phase 3: DAPO token-level policy gradient
-                # Accumulate token losses across batch, normalize by total
-                # active tokens at the end (not per-sequence averaging).
-                total_active_tokens = 0
-                accumulated_loss = 0.0
-                step_loss = 0.0
-
+                # Phase 3: DAPO token-level policy gradient (BATCHED)
+                # Collect all active completions, pad into one batch, single
+                # forward pass, then compute token-level losses from the logits.
+                sequences = []
                 for i, (prompt_ids_cpu, group_gen_ids, group_rewards) in enumerate(
                     zip(all_prompt_ids, all_gen_ids, batch_rewards)
                 ):
                     if not active_mask[i]:
                         continue
 
-                    prompt_ids = prompt_ids_cpu.to(device)
-                    rewards_t = torch.tensor(group_rewards, dtype=torch.float32, device=device)
+                    rewards_t = torch.tensor(group_rewards, dtype=torch.float32)
                     mean_r = rewards_t.mean()
                     std_r = rewards_t.std() + 1e-8
-                    advantages = ((rewards_t - mean_r) / std_r).detach()
+                    advantages = ((rewards_t - mean_r) / std_r)
                     total_reward += mean_r.item()
 
                     for j, gen_ids in enumerate(group_gen_ids):
                         if gen_ids.numel() == 0:
                             continue
+                        full_ids = torch.cat([prompt_ids_cpu, gen_ids])
+                        sequences.append({
+                            "full_ids": full_ids,
+                            "prompt_len": prompt_ids_cpu.shape[0],
+                            "gen_len": gen_ids.shape[0],
+                            "advantage": advantages[j].item(),
+                        })
 
-                        n_tokens = gen_ids.numel()
-                        total_active_tokens += n_tokens
+                step_loss = 0.0
+                if sequences:
+                    max_len = max(s["full_ids"].shape[0] for s in sequences)
+                    n_seqs = len(sequences)
+                    pad_id = self.tokenizer.pad_token_id or 0
 
-                        full_ids = torch.cat([prompt_ids, gen_ids.to(device)]).unsqueeze(0)
-                        attention_mask = torch.ones_like(full_ids)
+                    batch_ids = torch.full(
+                        (n_seqs, max_len), pad_id, dtype=torch.long, device=device
+                    )
+                    batch_mask = torch.zeros(
+                        (n_seqs, max_len), dtype=torch.long, device=device
+                    )
+                    for k, s in enumerate(sequences):
+                        seq_len = s["full_ids"].shape[0]
+                        batch_ids[k, :seq_len] = s["full_ids"].to(device)
+                        batch_mask[k, :seq_len] = 1
 
-                        logits = self.model(
-                            input_ids=full_ids,
-                            attention_mask=attention_mask,
-                        ).logits
+                    logits = self.model(
+                        input_ids=batch_ids,
+                        attention_mask=batch_mask,
+                    ).logits
 
-                        prompt_len = prompt_ids.shape[0]
-                        gen_logits = logits[0, prompt_len - 1 : -1, :]
-                        gen_targets = gen_ids.to(device)
-                        min_len = min(gen_logits.shape[0], gen_targets.shape[0])
-                        gen_logits = gen_logits[:min_len]
-                        gen_targets = gen_targets[:min_len]
-
+                    total_loss = torch.tensor(0.0, device=device)
+                    total_active_tokens = 0
+                    for k, s in enumerate(sequences):
+                        pl = s["prompt_len"]
+                        gl = s["gen_len"]
+                        gen_logits = logits[k, pl - 1 : pl - 1 + gl, :]
+                        gen_targets = batch_ids[k, pl : pl + gl]
                         log_probs = torch.log_softmax(gen_logits, dim=-1)
                         token_log_probs = log_probs.gather(
                             1, gen_targets.unsqueeze(1)
                         ).squeeze(1)
+                        total_loss += -(s["advantage"] * token_log_probs).sum()
+                        total_active_tokens += gl
 
-                        # Token-level loss: sum (not mean) weighted by advantage.
-                        # Final normalization happens after all tokens are accumulated.
-                        token_losses = -(advantages[j] * token_log_probs).sum()
-                        token_losses.backward()
-                        step_loss += token_losses.item()
+                    if total_active_tokens > 0:
+                        norm = total_active_tokens * self.config.gradient_accumulation_steps
+                        normalized_loss = total_loss / norm
+                        normalized_loss.backward()
+                        step_loss = normalized_loss.item()
 
-                # Normalize gradients by total active tokens (DAPO token-level normalization)
-                if total_active_tokens > 0:
-                    norm_factor = 1.0 / (total_active_tokens * self.config.gradient_accumulation_steps)
-                    for p in self.model.parameters():
-                        if p.grad is not None:
-                            p.grad.mul_(norm_factor)
-                    step_loss *= norm_factor
+                    del logits, batch_ids, batch_mask, total_loss
 
                 if (global_step + 1) % self.config.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -648,11 +663,14 @@ def train_all_teams(
         tokenizer.pad_token = tokenizer.eos_token
 
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=dtype,
-        trust_remote_code=True,
-    )
+    load_kwargs = dict(torch_dtype=dtype, trust_remote_code=True)
+    try:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name, attn_implementation="flash_attention_2", **load_kwargs
+        )
+        logger.info("Using Flash Attention 2")
+    except (ValueError, ImportError):
+        base_model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     if torch.cuda.is_available():
         base_model.to("cuda")
     base_model.gradient_checkpointing_enable()

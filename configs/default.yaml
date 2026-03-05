@@ -136,8 +136,8 @@ model:
     enabled: true
     host: "127.0.0.1"
     port: 30000
-    mem_fraction: 0.85
-    mem_fraction_training: 0.30
+    mem_fraction: 0.90
+    mem_fraction_training: 0.45
 
 training:
   method: "dapo"
@@ -147,21 +147,21 @@ training:
     dropout: 0.05
     target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
   dapo:
-    group_size: 8
+    group_size: 4
     learning_rate: 5.0e-6
     num_epochs: 3
-    per_device_batch_size: 2
-    gradient_accumulation_steps: 4
+    per_device_batch_size: 4
+    gradient_accumulation_steps: 2
     warmup_ratio: 0.1
     clip_ratio_low: 0.2
     clip_ratio_high: 0.28
     dynamic_sampling: true
     overlong_penalty: 1.0
-    overlong_buffer_len: 128
+    overlong_buffer_len: 16
     max_grad_norm: 0.5
-    logging_steps: 10
-    save_steps: 100
-    eval_steps: 50
+    logging_steps: 5
+    save_steps: 50
+    eval_steps: 25
   ray:
     enabled: true
     num_cpus: 4

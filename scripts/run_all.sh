@@ -114,6 +114,7 @@ launch_sglang() {
         --mem-fraction-static "$mem_frac" \
         --trust-remote-code \
         --log-level warning \
+        --enable-flashinfer \
         > "$LOG_DIR/sglang_${port}.log" 2>&1 &
     SGLANG_PID=$!
 
@@ -177,7 +178,7 @@ fi
 # =============================================
 # Step 4+5: Launch SGLang for rollout generation, then train
 #
-# SGLang runs with reduced memory (0.40) so the local training
+# SGLang runs with reduced memory (0.45) so the local training
 # model can coexist on the same GPU for the gradient forward pass.
 #
 # NOTE: launch_sglang and kill_sglang_on_port are called DIRECTLY
@@ -197,7 +198,7 @@ if [ "$NO_SGLANG" = false ]; then
     echo " Step 4: Launch SGLang for Rollout Generation"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$(date +%H:%M:%S)] Starting..."
-    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.30
+    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.45
     echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
 fi
 
@@ -205,7 +206,7 @@ run_step 5 "DAPO Training (load once, swap LoRA per team)" \
     "python scripts/05_grpo_train.py $TRAIN_ARGS"
 
 # =============================================
-# Kill SGLang (0.40 mem), relaunch with full memory (0.85) for eval
+# Kill SGLang, relaunch with full memory (0.90) for eval
 # =============================================
 
 EVAL_ARGS="--config $CONFIG"
@@ -218,7 +219,7 @@ else
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$(date +%H:%M:%S)] Starting..."
     kill_sglang_on_port "$SGLANG_PORT"
-    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.85
+    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.90
     echo "[$(date +%H:%M:%S)] ✓ Step 4b complete"
 fi
 
