@@ -319,7 +319,9 @@ class RLCRTrainer:
             )
         if torch.cuda.is_available():
             self.model.to("cuda")
-        self.model.gradient_checkpointing_enable()
+        self.model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
 
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -744,7 +746,9 @@ def train_all_teams(
         base_model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     if torch.cuda.is_available():
         base_model.to("cuda")
-    base_model.gradient_checkpointing_enable()
+    base_model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs={"use_reentrant": False}
+    )
 
     lora_target = config_dict.get("lora_target_modules", ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
     sglang_url = config_dict.get("sglang_url")
