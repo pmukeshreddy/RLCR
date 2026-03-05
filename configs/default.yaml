@@ -148,7 +148,7 @@ training:
     target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   dapo:
     group_size: 8
-    learning_rate: 5.0e-6
+    learning_rate: 2.0e-5
     num_epochs: 3
     per_device_batch_size: 2
     ppo_epochs: 2
@@ -157,8 +157,8 @@ training:
     clip_ratio_high: 0.28
     dynamic_sampling: true
     overlong_penalty: 1.0
-    overlong_buffer_len: 64
-    max_completion_length: 256
+    overlong_buffer_len: 32
+    max_completion_length: 128
     max_grad_norm: 0.5
     logging_steps: 5
     save_steps: 50

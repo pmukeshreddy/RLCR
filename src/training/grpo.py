@@ -221,7 +221,7 @@ def rollout_local(
     device,
     max_tokens: int = 32,
     max_prompt_length: int = 1024,
-    temperature: float = 0.9,
+    temperature: float = 1.0,
 ) -> tuple[list[list[list[dict]]], list[torch.Tensor], list[list[torch.Tensor]]]:
     """On-policy generation with the LoRA-adapted model.
 
@@ -519,6 +519,10 @@ class RLCRTrainer:
                         max_prompt_length=self.config.max_prompt_length,
                     )
                 torch.cuda.empty_cache()
+
+                if global_step == 0:
+                    sample = all_completions[0][0][0]["content"][:200]
+                    logger.info(f"  Sample completion (first): {sample!r}")
 
                 # Phase 2: Rewards + dynamic sampling filter
                 batch_rewards = []
