@@ -1,11 +1,12 @@
 """Reward functions for DAPO training on code review filtering.
 
-Two-component reward:
+Two-component reward (only when output is parseable):
   1. Shaped correctness (weight 0.8): distance-based, rewards calibration.
      reward = (1 - |score - label|) * 2 - 1  → maps to [-1, +1]
   2. Format compliance (weight 0.2): did the model produce parseable
      <think>/<score>/<decision> tags? +1 for clean output, 0 for garbage.
 
+Unparseable output (no extractable score) → flat -1.0 penalty.
 Plus DAPO overlong reward shaping for completions exceeding expected length.
 """
 
@@ -21,11 +22,11 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _DECISION_RE = re.compile(r"<decision>\s*(SURFACE|FILTER)\s*</decision>", re.IGNORECASE)
 
 
-def _extract_score(text: str) -> float:
+def _extract_score(text: str) -> float | None:
     """Extract a numeric score from model output.
 
     Tries: <score> tags first, then bare float, then any 0-1 number.
-    Returns 0.5 on failure.
+    Returns None on failure so callers can apply a garbage penalty.
     """
     m = _SCORE_RE.search(text)
     if m:
@@ -50,7 +51,7 @@ def _extract_score(text: str) -> float:
         except ValueError:
             pass
 
-    return 0.5
+    return None
 
 
 def _check_format(text: str) -> float:
@@ -84,18 +85,12 @@ class CodeReviewReward:
     def __init__(
         self,
         overlong_penalty: float = 1.0,
-        overlong_buffer_len: int = 64,
-        max_completion_length: int = 256,
-        action_rate_target: float = 0.55,
-        action_rate_penalty: float = 0.3,
+        overlong_buffer_len: int = 16,
+        max_completion_length: int = 64,
     ):
         self.overlong_penalty = overlong_penalty
         self.overlong_buffer_len = overlong_buffer_len
         self.max_completion_length = max_completion_length
-        self.action_rate_target = action_rate_target
-        self.action_rate_penalty = action_rate_penalty
-        self._ema_score: float = 0.5
-        self._ema_alpha: float = 0.1
 
     def __call__(
         self,
@@ -105,35 +100,21 @@ class CodeReviewReward:
         """Compute rewards for a batch of completions.
 
         Compatible with TRL's GRPOTrainer reward function signature.
-        Action rate penalty uses an exponential moving average across
-        batches (not per-group) for stable signal.
         """
         label = kwargs.get("label", [0] * len(completions))
         rewards = []
-        batch_scores = []
         for completion, lbl in zip(completions, label):
             text = completion[0]["content"] if isinstance(completion, list) else str(completion)
-            r, s = self._score_single(text, lbl)
+            r, _ = self._score_single(text, lbl)
             rewards.append(r)
-            batch_scores.append(s)
-
-        if batch_scores:
-            batch_mean = sum(batch_scores) / len(batch_scores)
-            self._ema_score = (
-                self._ema_alpha * batch_mean
-                + (1 - self._ema_alpha) * self._ema_score
-            )
-
-        if self.action_rate_penalty > 0:
-            drift = max(0.0, self._ema_score - self.action_rate_target)
-            penalty = drift * self.action_rate_penalty
-            rewards = [r - penalty for r in rewards]
-
         return rewards
 
     def _score_single(self, text: str, label: int) -> tuple[float, float]:
         """Returns (reward, extracted_score)."""
         score = _extract_score(text)
+
+        if score is None:
+            return -1.0, 0.5
 
         correctness = (1.0 - abs(score - float(label))) * 2.0 - 1.0
 
@@ -189,7 +170,10 @@ def correctness_reward(
     for completion, lbl in zip(completions, label):
         text = completion[0]["content"] if isinstance(completion, list) else str(completion)
         score = _extract_score(text)
-        rewards.append((1.0 - abs(score - float(lbl))) * 2.0 - 1.0)
+        if score is None:
+            rewards.append(-1.0)
+        else:
+            rewards.append((1.0 - abs(score - float(lbl))) * 2.0 - 1.0)
     return rewards
 
 
