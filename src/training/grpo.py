@@ -112,8 +112,13 @@ def _probe_sglang(url: str) -> bool:
     """Check if an SGLang server is healthy."""
     try:
         import requests
-        return requests.get(f"{url}/health", timeout=3).status_code == 200
-    except Exception:
+        resp = requests.get(f"{url}/health", timeout=10)
+        if resp.status_code == 200:
+            return True
+        logger.warning(f"SGLang health check returned {resp.status_code}: {resp.text[:200]}")
+        return False
+    except Exception as e:
+        logger.warning(f"SGLang health check failed at {url}: {e}")
         return False
 
 
@@ -463,8 +468,13 @@ class RLCRTrainer:
                     )
                     batch_rewards.append(group_rewards)
 
-                # Phase 3: Forward pass WITH gradients for differentiable log-probs
-                batch_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                # Phase 3: Per-completion forward + backward (memory-efficient)
+                # Each completion gets its own forward pass → loss → backward.
+                # Activations are freed after each backward, so only one
+                # completion's activations live on GPU at a time.
+                n_total = len(all_prompt_ids) * self.config.group_size
+                scale = 1.0 / (n_total * self.config.gradient_accumulation_steps)
+                step_loss = 0.0
 
                 for i, (prompt_ids_cpu, group_gen_ids, group_rewards) in enumerate(
                     zip(all_prompt_ids, all_gen_ids, batch_rewards)
@@ -476,10 +486,8 @@ class RLCRTrainer:
                     advantages = ((rewards_t - mean_r) / std_r).detach()
                     total_reward += mean_r.item()
 
-                    group_log_probs = []
-                    for gen_ids in group_gen_ids:
+                    for j, gen_ids in enumerate(group_gen_ids):
                         if gen_ids.numel() == 0:
-                            group_log_probs.append(torch.tensor(0.0, device=device, requires_grad=True))
                             continue
 
                         full_ids = torch.cat([prompt_ids, gen_ids.to(device)]).unsqueeze(0)
@@ -502,15 +510,10 @@ class RLCRTrainer:
                             1, gen_targets.unsqueeze(1)
                         ).squeeze(1)
                         avg_log_prob = token_log_probs.mean()
-                        group_log_probs.append(avg_log_prob)
 
-                    log_probs_t = torch.stack(group_log_probs)
-                    policy_loss = -(advantages * log_probs_t).mean()
-                    batch_loss = batch_loss + policy_loss / (
-                        len(all_prompt_ids) * self.config.gradient_accumulation_steps
-                    )
-
-                batch_loss.backward()
+                        comp_loss = -(advantages[j] * avg_log_prob) * scale
+                        comp_loss.backward()
+                        step_loss += comp_loss.item()
 
                 if (global_step + 1) % self.config.gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -523,13 +526,12 @@ class RLCRTrainer:
 
                 global_step += 1
 
-                if global_step % self.config.logging_steps == 0:
-                    avg_reward = total_reward / (
-                        self.config.logging_steps * len(prompts)
-                    )
+                log_every = min(self.config.logging_steps, max(total_steps // 3, 1))
+                if global_step % log_every == 0 or global_step == total_steps:
+                    avg_reward = total_reward / max(global_step % log_every or log_every, 1) / max(len(prompts), 1)
                     logger.info(
                         f"  Step {global_step}/{total_steps} | "
-                        f"Loss: {batch_loss.item():.4f} | "
+                        f"Loss: {step_loss:.4f} | "
                         f"Reward: {avg_reward:.3f} | "
                         f"LR: {scheduler.get_last_lr()[0]:.2e}"
                     )
@@ -646,8 +648,13 @@ def train_all_teams(
             logger.error(f"Team {team_name} failed: {e}")
             results[team_name] = {"error": str(e)}
 
-        # Detach LoRA, recover the clean base model for next team
-        base_model = peft_model.unload()
+        # Strip LoRA, recover clean base model for next team
+        try:
+            base_model = peft_model.unload()
+        except Exception:
+            base_model = peft_model.base_model.model
+        if hasattr(base_model, "peft_config"):
+            del base_model.peft_config
         del peft_model, trainer
         torch.cuda.empty_cache()
 
