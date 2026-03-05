@@ -459,10 +459,11 @@ class RLCRTrainer:
             num_training_steps=total_optim_steps,
         )
 
-        # Always use on-policy local generation during training so that
-        # rollouts reflect the current LoRA policy, not a frozen base model.
-        use_sglang = False
-        logger.info("Rollout via local LoRA model (on-policy)")
+        use_sglang = bool(self.config.sglang_url and _probe_sglang(self.config.sglang_url))
+        if use_sglang:
+            logger.info(f"Rollout via SGLang at {self.config.sglang_url} (fast, off-policy)")
+        else:
+            logger.info("Rollout via local LoRA model (on-policy, slower)")
 
         eps_low = self.config.clip_ratio_low
         eps_high = self.config.clip_ratio_high
