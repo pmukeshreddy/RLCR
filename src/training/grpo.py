@@ -576,76 +576,92 @@ class RLCRTrainer:
                     batch_ids[k, :seq_len] = s["full_ids"].to(device)
                     batch_mask[k, :seq_len] = 1
 
-                # Phase 3: Compute old log-probs (reference, no gradient)
-                with torch.no_grad():
-                    old_logits = self.model(
-                        input_ids=batch_ids, attention_mask=batch_mask
-                    ).logits
+                # Micro-batch forward passes to avoid materialising
+                # a single (n_seqs, max_len, vocab) logits tensor (~6 GiB).
+                _FWD_MB = 4
 
+                # Phase 3: Compute old log-probs (reference, no gradient)
                 old_token_lps = []
-                for k, s in enumerate(sequences):
-                    pl, gl = s["prompt_len"], s["gen_len"]
-                    glgts = old_logits[k, pl - 1 : pl - 1 + gl, :]
-                    targets = batch_ids[k, pl : pl + gl]
-                    lp = torch.log_softmax(glgts, dim=-1)
-                    old_token_lps.append(
-                        lp.gather(1, targets.unsqueeze(1)).squeeze(1).detach()
-                    )
-                del old_logits
+                with torch.no_grad():
+                    for mb_s in range(0, n_seqs, _FWD_MB):
+                        mb_e = min(mb_s + _FWD_MB, n_seqs)
+                        mb_logits = self.model(
+                            input_ids=batch_ids[mb_s:mb_e],
+                            attention_mask=batch_mask[mb_s:mb_e],
+                        ).logits
+                        for k_local, k_global in enumerate(range(mb_s, mb_e)):
+                            s = sequences[k_global]
+                            pl, gl = s["prompt_len"], s["gen_len"]
+                            glgts = mb_logits[k_local, pl - 1 : pl - 1 + gl, :]
+                            targets = batch_ids[k_global, pl : pl + gl]
+                            lp = torch.log_softmax(glgts, dim=-1)
+                            old_token_lps.append(
+                                lp.gather(1, targets.unsqueeze(1)).squeeze(1)
+                            )
+                        del mb_logits
 
                 # Phase 4: PPO inner loop with DAPO Clip-Higher
+                # Pre-compute total tokens for correct loss normalisation
+                # across micro-batched backward passes.
+                total_tokens_all = sum(s["gen_len"] for s in sequences)
                 step_loss = 0.0
-                for ppo_step in range(self.config.ppo_epochs):
-                    logits = self.model(
-                        input_ids=batch_ids, attention_mask=batch_mask
-                    ).logits
 
-                    total_loss = torch.tensor(0.0, device=device)
-                    total_tokens = 0
+                for ppo_step in range(self.config.ppo_epochs):
+                    optimizer.zero_grad()
+                    total_loss_val = 0.0
                     clip_frac = 0.0
                     n_clip_tokens = 0
 
-                    for k, s in enumerate(sequences):
-                        pl, gl = s["prompt_len"], s["gen_len"]
-                        gen_logits = logits[k, pl - 1 : pl - 1 + gl, :]
-                        gen_targets = batch_ids[k, pl : pl + gl]
+                    for mb_s in range(0, n_seqs, _FWD_MB):
+                        mb_e = min(mb_s + _FWD_MB, n_seqs)
+                        logits = self.model(
+                            input_ids=batch_ids[mb_s:mb_e],
+                            attention_mask=batch_mask[mb_s:mb_e],
+                        ).logits
 
-                        new_lp = torch.log_softmax(gen_logits, dim=-1)
-                        new_token_lps = new_lp.gather(
-                            1, gen_targets.unsqueeze(1)
-                        ).squeeze(1)
+                        mb_loss = torch.tensor(0.0, device=device)
+                        for k_local, k_global in enumerate(range(mb_s, mb_e)):
+                            s = sequences[k_global]
+                            pl, gl = s["prompt_len"], s["gen_len"]
+                            gen_logits = logits[k_local, pl - 1 : pl - 1 + gl, :]
+                            gen_targets = batch_ids[k_global, pl : pl + gl]
 
-                        ratio = torch.exp(new_token_lps - old_token_lps[k])
-                        clipped_ratio = torch.clamp(
-                            ratio, 1.0 - eps_low, 1.0 + eps_high
-                        )
+                            new_lp = torch.log_softmax(gen_logits, dim=-1)
+                            new_token_lps = new_lp.gather(
+                                1, gen_targets.unsqueeze(1)
+                            ).squeeze(1)
 
-                        adv = s["advantage"]
-                        surr1 = ratio * adv
-                        surr2 = clipped_ratio * adv
-                        total_loss += -torch.min(surr1, surr2).sum()
-                        total_tokens += gl
+                            ratio = torch.exp(new_token_lps - old_token_lps[k_global])
+                            clipped_ratio = torch.clamp(
+                                ratio, 1.0 - eps_low, 1.0 + eps_high
+                            )
 
-                        with torch.no_grad():
-                            clip_frac += (ratio != clipped_ratio).float().sum().item()
-                            n_clip_tokens += gl
+                            adv = s["advantage"]
+                            surr1 = ratio * adv
+                            surr2 = clipped_ratio * adv
+                            mb_loss += -torch.min(surr1, surr2).sum()
 
-                    if total_tokens > 0:
-                        normalized = total_loss / total_tokens
-                        normalized.backward()
+                            with torch.no_grad():
+                                clip_frac += (ratio != clipped_ratio).float().sum().item()
+                                n_clip_tokens += gl
+
+                        if total_tokens_all > 0:
+                            (mb_loss / total_tokens_all).backward()
+                            total_loss_val += mb_loss.item()
+                        del logits, mb_loss
+
+                    if total_tokens_all > 0:
                         torch.nn.utils.clip_grad_norm_(
                             [p for p in self.model.parameters() if p.requires_grad],
                             self.config.max_grad_norm,
                         )
                         optimizer.step()
                         scheduler.step()
-                        optimizer.zero_grad()
-                        step_loss = normalized.item()
+                        step_loss = total_loss_val / total_tokens_all
                         optim_step += 1
 
-                    del logits
-
                 del batch_ids, batch_mask, old_token_lps
+                torch.cuda.empty_cache()
 
                 log_every = min(self.config.logging_steps, max(total_batches // 3, 1))
                 if global_step % log_every == 0 or global_step == total_batches:
