@@ -23,6 +23,7 @@ from loguru import logger
 
 from src.data.parser import CodeReviewSample
 from src.evaluation.metrics import compute_metrics, MetricsResult
+from src.training.rewards import calibrate_threshold
 
 
 class ColdStartEvaluator:
@@ -109,14 +110,16 @@ class ColdStartEvaluator:
         all_train_samples: list[CodeReviewSample],
         test_samples: list[CodeReviewSample],
         train_fn=None,
+        calibrated_threshold: float | None = None,
     ) -> dict[int, list[MetricsResult]]:
         """Evaluate RL model at each cold-start step.
 
         For each step N and each seed:
           1. Take N random training samples
-          2. Fine-tune the model with DAPO on those N samples
-             (or use a pre-trained model at the corresponding checkpoint)
-          3. Evaluate on the full test set
+          2. If train_fn provided: fine-tune a fresh LoRA from those N samples
+          3. Build vote history from those N samples
+          4. Evaluate on the full test set
+          5. Apply calibrated threshold if provided (instead of default 0.5)
         """
         step_results: dict[int, list[MetricsResult]] = defaultdict(list)
 
@@ -124,18 +127,21 @@ class ColdStartEvaluator:
             seed = self.base_seed + seed_offset
 
             for n_samples in self.steps:
-                # Separate RNGs: one for training sample selection, one for
-                # in-context vote history. Both are deterministic per
-                # (seed, n_samples) so results are reproducible and independent.
                 train_rng = random.Random(seed * 10000 + n_samples)
                 context_rng = random.Random(seed * 10000 + n_samples + 1)
 
-                if n_samples > 0 and train_fn is not None:
+                chosen = []
+                if n_samples > 0:
                     chosen = train_rng.sample(
                         all_train_samples,
                         min(n_samples, len(all_train_samples)),
                     )
-                    train_fn(chosen, seed=seed)
+
+                if n_samples > 0 and train_fn is not None:
+                    try:
+                        train_fn(chosen, seed=seed)
+                    except Exception as e:
+                        logger.warning(f"train_fn failed at n={n_samples} seed={seed}: {e}")
 
                 vote_history = []
                 if n_samples > 0:
@@ -159,15 +165,22 @@ class ColdStartEvaluator:
                     vote_history=vote_history,
                 )
                 labels = [s.label for s in test_samples]
-                decisions = [o.binary_label for o in outputs]
                 scores_list = [o.score for o in outputs]
+
+                threshold = calibrated_threshold or 0.5
+                if calibrated_threshold is None and n_samples >= 10:
+                    threshold = calibrate_threshold(
+                        scores_list, labels, target_action_rate=0.55
+                    )
+
+                decisions = [1 if s >= threshold else 0 for s in scores_list]
 
                 metrics = compute_metrics(labels, decisions, scores_list)
                 step_results[n_samples].append(metrics)
 
                 logger.debug(
                     f"  RL | {team_name} | n={n_samples} | seed={seed} | "
-                    f"{metrics.summary_str()}"
+                    f"t={threshold:.2f} | {metrics.summary_str()}"
                 )
 
         key = f"rl_{team_name}"

@@ -61,8 +61,9 @@ Greptile's team [documented](https://greptile.com): they tried 4 approaches, and
 │             │              │  └───────┬────────┘  │  │
 │             │              │          │           │  │
 │             │              │  ┌───────▼────────┐  │  │
-│             │              │  │ Reward Signal: │  │  │
-│             │              │  │ was_addressed? │  │  │
+│             │              │  │ Shaped Reward: │  │  │
+│             │              │  │ calibration +  │  │  │
+│             │              │  │ format check   │  │  │
 │             │              │  └───────┬────────┘  │  │
 │             │              │          │           │  │
 │             │              │  ┌───────▼────────┐  │  │
@@ -97,7 +98,7 @@ team. It identifies a concrete vulnerability with a clear fix.
 <decision>SURFACE</decision>
 ```
 
-DAPO trains this scoring ability by exploring different reasoning strategies in groups, keeping what works for each team. It improves on GRPO with Clip-Higher (asymmetric clipping for policy diversity), token-level loss normalization, dynamic sampling (skips uninformative groups), and no KL penalty. The reward is simple: did the developer actually address this comment?
+DAPO trains this scoring ability by exploring different reasoning strategies in groups of 8, keeping what works for each team. It improves on GRPO with Clip-Higher (asymmetric clipping for policy diversity), token-level loss normalization, dynamic sampling (skips uninformative groups), and no KL penalty. The reward is two-component: shaped correctness (distance from target, 80% weight) rewards calibration, plus format compliance (proper think/score/decision tags, 20% weight). An action-rate penalty discourages the model from surfacing everything. Training and evaluation use the **same** structured prompt with reasoning-length completions (256 tokens), so DAPO can explore diverse reasoning strategies — not just different numbers. LoRA targets include attention AND MLP layers (`q/v/k/o_proj` + `gate/up/down_proj`).
 
 ## Quick Start
 

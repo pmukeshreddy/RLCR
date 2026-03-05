@@ -42,19 +42,6 @@ Respond with your analysis in this exact format:
 <score>[0.0 to 1.0]</score>
 <decision>[SURFACE or FILTER]</decision>"""
 
-TRAINING_SYSTEM_PROMPT = """You score code review comments for a {team_type} team.
-Team: {team_description}
-{vote_context}
-Output ONLY a number between 0.0 and 1.0. Above 0.5 = surface, below 0.5 = filter."""
-
-TRAINING_USER_PROMPT = """Diff:
-{diff}
-
-Comment: "{comment}"
-
-Score:"""
-
-
 USER_PROMPT = """Code diff:
 ```
 {diff}
@@ -132,56 +119,6 @@ def format_prompt_text(
     messages = format_scoring_prompt(
         diff, comment, team_name, team_description, vote_history, max_context_votes
     )
-    if tokenizer and hasattr(tokenizer, "apply_chat_template"):
-        try:
-            return tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        except (ImportError, Exception):
-            pass
-    parts = []
-    for msg in messages:
-        role = msg["role"].upper()
-        parts.append(f"### {role}\n{msg['content']}")
-    parts.append("### ASSISTANT\n")
-    return "\n\n".join(parts)
-
-
-def format_training_prompt_text(
-    diff: str,
-    comment: str,
-    team_name: str,
-    team_description: str,
-    vote_history: list[dict],
-    tokenizer=None,
-    max_context_votes: int = 6,
-) -> str:
-    """Build a simplified prompt for training: model just outputs a score number.
-
-    Shorter prompt = faster generation, cleaner reward signal, less format confusion.
-    """
-    recent_votes = vote_history[-max_context_votes:] if vote_history else []
-    vote_lines = []
-    for v in recent_votes:
-        icon = "LIKED" if v["vote"] == "upvote" else "DISLIKED"
-        vote_lines.append(f'- {icon}: "{v["comment"][:80]}"')
-    vote_context = "\n".join(vote_lines) if vote_lines else "(No feedback yet)"
-
-    system_msg = TRAINING_SYSTEM_PROMPT.format(
-        team_type=team_name,
-        team_description=team_description,
-        vote_context=vote_context,
-    )
-    user_msg = TRAINING_USER_PROMPT.format(
-        diff=diff[:1000],
-        comment=comment[:300],
-    )
-
-    messages = [
-        {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg},
-    ]
-
     if tokenizer and hasattr(tokenizer, "apply_chat_template"):
         try:
             return tokenizer.apply_chat_template(

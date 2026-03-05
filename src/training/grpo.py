@@ -42,7 +42,7 @@ from loguru import logger
 from peft import LoraConfig, get_peft_model, TaskType
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.models.scoring import format_prompt_text, format_training_prompt_text
+from src.models.scoring import format_prompt_text
 from src.training.rewards import CodeReviewReward
 
 
@@ -63,23 +63,23 @@ class GRPORunConfig:
     lora_alpha: int = 32
     lora_dropout: float = 0.05
     lora_target_modules: list[str] | None = None
-    group_size: int = 4
+    group_size: int = 8
     learning_rate: float = 5e-6
     num_epochs: int = 3
-    per_device_batch_size: int = 4
+    per_device_batch_size: int = 2
     gradient_accumulation_steps: int = 1  # only used by TRL path
-    ppo_epochs: int = 2  # inner optimization steps per rollout batch (custom loop)
+    ppo_epochs: int = 2
     warmup_ratio: float = 0.1
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.28
     dynamic_sampling: bool = True
     overlong_penalty: float = 1.0
-    overlong_buffer_len: int = 16
+    overlong_buffer_len: int = 64
     max_grad_norm: float = 0.5
     logging_steps: int = 5
     save_steps: int = 50
     eval_steps: int = 25
-    max_completion_length: int = 32
+    max_completion_length: int = 256
     max_prompt_length: int = 1024
     seed: int = 42
     sglang_url: str | None = None
@@ -95,15 +95,12 @@ def build_training_dataset(
 ) -> Dataset:
     """Convert code review samples into a training-ready dataset.
 
-    Uses simplified training prompt (model just outputs a score number).
-    Each row has:
-      - prompt: formatted text prompt
-      - label: ground truth (for reward computation)
-      - team: team name (for reward context)
+    Uses the SAME structured prompt as evaluation (think/score/decision format)
+    so DAPO can explore diverse reasoning strategies.
     """
     records = []
     for s in samples:
-        prompt = format_training_prompt_text(
+        prompt = format_prompt_text(
             diff=s["diff"] if isinstance(s, dict) else s.diff,
             comment=s["comment"] if isinstance(s, dict) else s.comment,
             team_name=team_name,
@@ -317,7 +314,7 @@ class RLCRTrainer:
             r=self.config.lora_r,
             lora_alpha=self.config.lora_alpha,
             lora_dropout=self.config.lora_dropout,
-            target_modules=self.config.lora_target_modules or ["q_proj", "v_proj"],
+            target_modules=self.config.lora_target_modules or ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         )
         self.model = get_peft_model(self.model, lora_config)
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -727,7 +724,7 @@ def train_all_teams(
         base_model.to("cuda")
     base_model.gradient_checkpointing_enable()
 
-    lora_target = config_dict.get("lora_target_modules", ["q_proj", "v_proj"])
+    lora_target = config_dict.get("lora_target_modules", ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
     sglang_url = config_dict.get("sglang_url")
     team_names = list(teams.keys())
 
@@ -774,7 +771,8 @@ def train_all_teams(
             clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
             dynamic_sampling=config_dict.get("dynamic_sampling", True),
             overlong_penalty=config_dict.get("overlong_penalty", 1.0),
-            overlong_buffer_len=config_dict.get("overlong_buffer_len", 128),
+            overlong_buffer_len=config_dict.get("overlong_buffer_len", 64),
+            max_completion_length=config_dict.get("max_completion_length", 256),
             seed=config_dict.get("seed", 42),
             sglang_url=sglang_url,
             sglang_concurrent=config_dict.get("sglang_concurrent", 16),
@@ -837,7 +835,8 @@ def train_team_worker(
         clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
         dynamic_sampling=config_dict.get("dynamic_sampling", True),
         overlong_penalty=config_dict.get("overlong_penalty", 1.0),
-        overlong_buffer_len=config_dict.get("overlong_buffer_len", 16),
+        overlong_buffer_len=config_dict.get("overlong_buffer_len", 64),
+        max_completion_length=config_dict.get("max_completion_length", 256),
         seed=config_dict.get("seed", 42),
         sglang_url=config_dict.get("sglang_url"),
         sglang_concurrent=config_dict.get("sglang_concurrent", 32),
