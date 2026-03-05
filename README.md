@@ -98,7 +98,15 @@ team. It identifies a concrete vulnerability with a clear fix.
 <decision>SURFACE</decision>
 ```
 
-DAPO trains this scoring ability by exploring different reasoning strategies in groups of 8, keeping what works for each team. It improves on GRPO with Clip-Higher (asymmetric clipping for policy diversity), token-level loss normalization, dynamic sampling (skips uninformative groups), and no KL penalty. The reward is two-component: shaped correctness (distance from target, 80% weight) rewards calibration, plus format compliance (proper think/score/decision tags, 20% weight). An action-rate penalty discourages the model from surfacing everything. Training and evaluation use the **same** structured prompt with reasoning-length completions (256 tokens), so DAPO can explore diverse reasoning strategies — not just different numbers. LoRA targets include attention AND MLP layers (`q/v/k/o_proj` + `gate/up/down_proj`).
+**But the RL model never runs in production.** It's a teacher. The full architecture is three stages:
+
+1. **Train the teacher** (DAPO + LoRA): expensive, GPU-bound, runs offline on a schedule
+2. **Distill into embeddings**: run the teacher over the corpus, collect soft labels, fine-tune a sentence transformer so cosine similarity predicts the teacher's scores
+3. **Serve with distilled embeddings**: same FAISS architecture as Greptile, but the embedding space was shaped by RL reasoning — not generic semantic similarity
+
+The production system runs on CPU at <10ms per query. The key insight: "use a set for O(1) lookups" and "consider caching this query" are far apart in generic MiniLM space but close in the distilled space, because the RL teacher understood both are performance-relevant.
+
+DAPO trains the teacher by exploring different reasoning strategies in groups of 8, keeping what works for each team. Two-component shaped reward (correctness 80% + format 20%), action-rate calibration, unified train/eval prompts, 256-token reasoning completions, LoRA targeting attention + MLP layers.
 
 ## Quick Start
 
@@ -115,31 +123,25 @@ bash scripts/run_all.sh
 ### Step by step
 
 ```bash
-# 1. Download real GitHub Code Review dataset (218K+ samples, 725 repos)
-python scripts/01_download_data.py
+# === Stage 1: Data + Baseline ===
+python scripts/01_download_data.py          # 218K+ real samples, 725 repos
+python scripts/02_simulate_teams.py         # 5 teams from comment_type labels
+python scripts/03_run_baseline.py           # Embedding baseline (Greptile's approach)
 
-# 2. Assign to 5 teams using real comment_type labels
-python scripts/02_simulate_teams.py
+# === Stage 2: Train the DAPO Teacher ===
+bash scripts/04_launch_sglang.sh            # SGLang for fast rollout generation
+python scripts/05_grpo_train.py             # DAPO training (single GPU, LoRA per team)
+python scripts/06_evaluate.py               # Cold-start evaluation
+python scripts/06b_ab_test.py               # A/B split test
 
-# 3. Run embedding baseline (Greptile's approach, tuned fairly)
-python scripts/03_run_baseline.py
+# === Stage 3: Distill into Embeddings ===
+python scripts/09_teacher_label.py          # Score corpus with trained teacher
+python scripts/10_distill.py                # Fine-tune MiniLM from teacher labels
+python scripts/11_eval_distilled.py         # Three-way comparison (THE chart)
 
-# 4. Launch SGLang (used for fast rollout generation during training + eval)
-bash scripts/04_launch_sglang.sh
-
-# 5. Train DAPO policies per team (base model loaded once, LoRA swapped per team)
-#    SGLang handles rollout generation, local model does the gradient pass
-python scripts/05_grpo_train.py            # single GPU (default)
-python scripts/05_grpo_train.py --ray      # multi-GPU via Ray
-
-# 6. Full evaluation with cold-start curves
-python scripts/06_evaluate.py
-
-# 7. Scale to larger model, compare
-python scripts/07_scale_4b.py
-
-# 8. Generate publication-quality charts
-python scripts/08_visualize.py
+# === Finalize ===
+python scripts/07_scale_4b.py               # Scale comparison (optional)
+python scripts/08_visualize.py              # Publication-quality figures
 ```
 
 ### Quick test (single team, no SGLang)

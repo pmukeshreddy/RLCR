@@ -169,6 +169,15 @@ training:
     num_gpus: 1
     num_workers: 1
 
+distillation:
+  base_model: "sentence-transformers/all-MiniLM-L6-v2"
+  output_dir: "outputs/distilled_model"
+  labels_dir: "data/distillation_labels"
+  backbone_epochs: 3
+  head_epochs: 20
+  batch_size: 64
+  pairs_per_sample: 5
+
 evaluation:
   cold_start_steps: [0, 5, 10, 20, 50, 100]
   n_seeds: 3

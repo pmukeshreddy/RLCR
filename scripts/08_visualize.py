@@ -194,7 +194,23 @@ def main():
     else:
         console.print("[yellow]No A/B test results found. Run step 06b first.[/yellow]")
 
-    # --- 6. Model Comparison ---
+    # --- 6. Three-Way Comparison ---
+    three_way_path = results_dir / "three_way_results.json"
+    if three_way_path.exists():
+        console.print("\n[cyan]Generating three-way comparison charts...[/cyan]")
+        with open(three_way_path) as f:
+            three_way_data = json.load(f)
+
+        for team_name, team_data in three_way_data.items():
+            path = viz.plot_three_way_cold_start(team_data, team_name)
+            generated.append(str(path))
+
+        path = viz.plot_three_way_all_teams(three_way_data)
+        generated.append(str(path))
+    else:
+        console.print("[yellow]No three-way results found. Run step 11 first.[/yellow]")
+
+    # --- 7. Model Comparison ---
     model_comp_path = results_dir / "model_comparison.json"
     if model_comp_path.exists():
         console.print("\n[cyan]Generating model comparison chart...[/cyan]")

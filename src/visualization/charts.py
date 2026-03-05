@@ -34,6 +34,7 @@ class RLCRVisualizer:
         style: str = "seaborn-v0_8-whitegrid",
         rl_color: str = "#2196F3",
         baseline_color: str = "#FF5722",
+        distilled_color: str = "#4CAF50",
         random_color: str = "#9E9E9E",
         team_colors: dict[str, str] | None = None,
     ):
@@ -43,6 +44,7 @@ class RLCRVisualizer:
         self.figsize = figsize
         self.rl_color = rl_color
         self.baseline_color = baseline_color
+        self.distilled_color = distilled_color
         self.random_color = random_color
         self.team_colors = team_colors or {
             "security": "#E53935",
@@ -391,6 +393,127 @@ class RLCRVisualizer:
         table_path.write_text(table)
         logger.info(f"Saved: {table_path}")
         return table
+
+    def plot_three_way_cold_start(
+        self,
+        three_way_data: dict[str, dict],
+        team_name: str = "all",
+        metric: str = "f1",
+        title: str | None = None,
+    ) -> Path:
+        """THE killer chart: three-line cold-start comparison.
+
+        Shows vanilla embeddings, RL teacher, and distilled embeddings
+        on the same axes. Demonstrates that distillation captures most
+        of the RL advantage while being production-viable.
+        """
+        fig, ax = plt.subplots(figsize=self.figsize)
+
+        method_config = {
+            "vanilla": {"color": self.baseline_color, "label": "Vanilla Embeddings", "marker": "s", "ls": "-"},
+            "rl_teacher": {"color": self.rl_color, "label": "DAPO Teacher (GPU)", "marker": "o", "ls": "-"},
+            "distilled": {"color": self.distilled_color, "label": "Distilled Embeddings (CPU)", "marker": "D", "ls": "-"},
+        }
+
+        for method, cfg in method_config.items():
+            data = three_way_data.get(method, {})
+            if not data:
+                continue
+            steps = sorted(int(k) for k in data.keys())
+            means = [data[str(s) if str(s) in data else s][metric]["mean"] for s in steps]
+            stds = [data[str(s) if str(s) in data else s][metric]["std"] for s in steps]
+            means_arr = np.array(means)
+            stds_arr = np.array(stds)
+
+            ax.plot(steps, means_arr, color=cfg["color"], marker=cfg["marker"],
+                    linewidth=2.5, markersize=8, label=cfg["label"], zorder=3,
+                    linestyle=cfg["ls"])
+            ax.fill_between(steps, means_arr - stds_arr, means_arr + stds_arr,
+                            alpha=0.12, color=cfg["color"], zorder=2)
+
+        ax.axhline(y=0.5, color=self.random_color, linestyle="--",
+                    linewidth=1.5, label="Random", alpha=0.7)
+
+        ax.set_xlabel("Number of Team Feedback Signals", fontsize=13)
+        ax.set_ylabel(f"{metric.upper()} Score", fontsize=13)
+        ax.set_title(
+            title or f"Three-Way Cold-Start — {team_name.title()}",
+            fontsize=15, fontweight="bold", pad=15,
+        )
+        ax.legend(fontsize=11, loc="lower right", framealpha=0.9)
+        ax.set_ylim(0.3, 1.0)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        path = self.output_dir / f"three_way_{team_name}_{metric}.png"
+        fig.savefig(path, dpi=self.dpi, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"Saved: {path}")
+        return path
+
+    def plot_three_way_all_teams(
+        self,
+        all_team_data: dict[str, dict[str, dict]],
+        metric: str = "f1",
+    ) -> Path:
+        """Three-way cold-start for all teams in a multi-panel figure."""
+        teams = list(all_team_data.keys())
+        n_teams = len(teams)
+        n_cols = min(3, n_teams)
+        n_rows = (n_teams + n_cols - 1) // n_cols
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+        if n_rows == 1 and n_cols == 1:
+            axes = np.array([axes])
+        axes = axes.flatten()
+
+        method_styles = {
+            "vanilla": (self.baseline_color, "s", "Vanilla"),
+            "rl_teacher": (self.rl_color, "o", "RL Teacher"),
+            "distilled": (self.distilled_color, "D", "Distilled"),
+        }
+
+        for idx, team_name in enumerate(teams):
+            ax = axes[idx]
+            team_data = all_team_data[team_name]
+
+            for method, (color, marker, label) in method_styles.items():
+                data = team_data.get(method, {})
+                if not data:
+                    continue
+                steps = sorted(int(k) for k in data.keys())
+                means = [data[str(s) if str(s) in data else s][metric]["mean"] for s in steps]
+                stds = [data[str(s) if str(s) in data else s][metric]["std"] for s in steps]
+                means_arr = np.array(means)
+                stds_arr = np.array(stds)
+
+                ax.plot(steps, means_arr, color=color, marker=marker,
+                        linewidth=2, markersize=5, label=label)
+                ax.fill_between(steps, means_arr - stds_arr, means_arr + stds_arr,
+                                alpha=0.12, color=color)
+
+            ax.axhline(y=0.5, color=self.random_color, linestyle="--", linewidth=1, alpha=0.5)
+            team_color = self.team_colors.get(team_name, "#333")
+            ax.set_title(team_name.title(), fontsize=12, fontweight="bold", color=team_color)
+            ax.set_ylim(0.3, 1.0)
+            ax.grid(True, alpha=0.2)
+            if idx == 0:
+                ax.legend(fontsize=7)
+
+        for idx in range(n_teams, len(axes)):
+            axes[idx].set_visible(False)
+
+        fig.supxlabel("Training Samples", fontsize=13, y=0.02)
+        fig.supylabel(f"{metric.upper()}", fontsize=13, x=0.02)
+        fig.suptitle("Three-Way Cold-Start: Vanilla vs RL Teacher vs Distilled",
+                     fontsize=15, fontweight="bold", y=1.02)
+        plt.tight_layout()
+
+        path = self.output_dir / f"three_way_all_teams_{metric}.png"
+        fig.savefig(path, dpi=self.dpi, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"Saved: {path}")
+        return path
 
     def plot_ab_test(
         self,
