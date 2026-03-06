@@ -8,6 +8,7 @@ sAmpling Policy Optimization):
   - Clip-Higher, token-level loss, dynamic sampling, no KL penalty
   - Loads base model once, swaps LoRA per team (efficient single-GPU default)
   - Optional: --ray for multi-GPU parallel training
+  - Optional: --verl for veRL FSDP training (both GPUs for training + vLLM rollout)
 
 Uses Qwen3-4B by default (cfg.model.large). Pass --small to use Qwen3-1.7B.
 
@@ -15,6 +16,7 @@ Usage:
     python scripts/05_grpo_train.py                    # All teams, Qwen3-4B
     python scripts/05_grpo_train.py --team security    # Single team
     python scripts/05_grpo_train.py --ray              # Multi-GPU via Ray
+    python scripts/05_grpo_train.py --verl             # veRL FSDP + vLLM (all GPUs)
     python scripts/05_grpo_train.py --small            # Use Qwen3-1.7B instead
 """
 
@@ -127,6 +129,7 @@ def main():
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--team", default=None, help="Train specific team only")
     parser.add_argument("--ray", action="store_true", help="Multi-GPU parallel training via Ray")
+    parser.add_argument("--verl", action="store_true", help="veRL FSDP + vLLM training (all GPUs)")
     parser.add_argument("--small", action="store_true", help="Use small model (Qwen3-1.7B) instead of default 4B")
     args = parser.parse_args()
 
@@ -150,7 +153,12 @@ def main():
     simulator = TeamSimulator.load(teams_dir, team_configs)
 
     dapo = cfg.training.dapo
-    mode = "Ray (multi-GPU)" if args.ray else "single-GPU (model loaded once, LoRA swapped per team)"
+    if args.verl:
+        mode = "veRL FSDP + vLLM (all GPUs, hybrid engine)"
+    elif args.ray:
+        mode = "Ray (multi-GPU)"
+    else:
+        mode = "single-GPU (model loaded once, LoRA swapped per team)"
     console.print(f"Model: {model_name}")
     console.print(f"Method: DAPO with LoRA (r={cfg.training.lora.r})")
     console.print(f"Group size: {dapo.group_size}")
@@ -161,7 +169,13 @@ def main():
     console.print(f"Training mode: {mode}")
     console.print(f"Rollout generation: {'SGLang' if sglang_url else 'local model'}")
 
-    if args.team:
+    if args.verl:
+        from src.training.verl_trainer import train_all_teams_verl
+        console.print("\n[bold]Training all teams via veRL (FSDP + vLLM)[/bold]")
+        config_dict = _build_config_dict(model_name, sglang_url, cfg)
+        results = train_all_teams_verl(simulator.teams, config_dict)
+
+    elif args.team:
         console.print(f"\n[bold]Training single team: {args.team}[/bold]")
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:

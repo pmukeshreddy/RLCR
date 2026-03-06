@@ -31,6 +31,7 @@ NO_SGLANG=false
 BASELINE_ONLY=false
 QUICK=false
 SKIP_TRAINING=false
+USE_VERL=false
 CONFIG="configs/default.yaml"
 SGLANG_PID=""
 SGLANG_PORT=30000
@@ -42,6 +43,7 @@ for arg in "$@"; do
         --quick) QUICK=true ;;
         --skip-training) SKIP_TRAINING=true ;;
         --skip-baseline) SKIP_BASELINE=true ;;
+        --verl) USE_VERL=true ;;
         --config=*) CONFIG="${arg#*=}" ;;
     esac
 done
@@ -245,6 +247,15 @@ if [ "$SKIP_TRAINING" = true ]; then
         exit 1
     fi
     echo "[✓] Using pre-trained adapters from outputs/dapo/"
+elif [ "$USE_VERL" = true ]; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo " Step 4+5: veRL Training (FSDP + vLLM, all GPUs)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "[$(date +%H:%M:%S)] Starting..."
+    echo "[*] SGLang NOT launched — veRL manages its own vLLM engine internally"
+    run_step 5 "DAPO Training (veRL FSDP + vLLM)" \
+        "python scripts/05_grpo_train.py --verl $TRAIN_ARGS"
 else
     if [ "$NO_SGLANG" = false ]; then
         echo ""

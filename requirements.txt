@@ -19,6 +19,7 @@ flashinfer>=0.1.0
 
 # Distributed
 ray[default]>=2.9.0
+verl>=0.3.0
 
 # Visualization
 matplotlib>=3.8.0

@@ -142,6 +142,7 @@ model:
     gpu_ids: "0,1"
 
 training:
+  backend: "custom"  # "custom" (original SGLang loop) or "verl" (FSDP + vLLM)
   method: "dapo"
   lora:
     r: 32
@@ -171,6 +172,14 @@ training:
     num_cpus: 4
     num_gpus: 1
     num_workers: 1
+  verl:
+    rollout_engine: "vllm"
+    vllm_gpu_memory_utilization: 0.80
+    tensor_parallel_size: 1
+    fsdp_param_offload: false
+    fsdp_optimizer_offload: false
+    rollout_temperature: 1.2
+    rollout_top_p: 0.95
 
 distillation:
   base_model: "sentence-transformers/all-MiniLM-L6-v2"
