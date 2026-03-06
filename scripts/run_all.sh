@@ -207,10 +207,10 @@ fi
 # =============================================
 
 TRAIN_ARGS="--config $CONFIG"
-SGLANG_MODEL="Qwen/Qwen3-4B-Instruct-2507"
+SGLANG_MODEL=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print(c['model']['large']['name'])" 2>/dev/null || echo "Qwen/Qwen2.5-14B-Instruct")
 if [ "$QUICK" = true ]; then
     TRAIN_ARGS="$TRAIN_ARGS --team security --small"
-    SGLANG_MODEL="Qwen/Qwen3-1.7B"
+    SGLANG_MODEL=$(python3 -c "import yaml; c=yaml.safe_load(open('$CONFIG')); print(c['model']['small']['name'])" 2>/dev/null || echo "Qwen/Qwen3-1.7B")
 fi
 
 NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l || echo "1")
