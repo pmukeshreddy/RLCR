@@ -556,17 +556,40 @@ class RLCRTrainer:
             f"{self.config.model_name}:{current_adapter}" if use_sglang and current_adapter else None
         )
 
-        def _do_rollout(prompts_arg):
+        def _do_rollout(prompts_arg, model_id=None):
             return rollout_sglang(
                 prompts=prompts_arg,
                 group_size=self.config.group_size,
                 sglang_url=self.config.sglang_url,
-                model_name=sglang_model,
+                model_name=model_id if model_id is not None else sglang_model,
                 tokenizer=self.tokenizer,
                 max_tokens=self.config.max_completion_length,
                 max_workers=self.config.sglang_concurrent,
                 max_prompt_length=self.config.max_prompt_length,
             )
+
+        def _sync_then_rollout(prompts_arg):
+            """VERL-style: sync LoRA weights to SGLang then immediately start
+            rollout — both happen in the background thread so the main thread
+            is free to prepare the next batch, log, and save checkpoints."""
+            new_adapter = _sync_lora_to_sglang(
+                self.model, self.config.sglang_url, adapter_sync_dir,
+            )
+            model_id = (
+                f"{self.config.model_name}:{new_adapter}"
+                if new_adapter else self.config.model_name
+            )
+            completions, p_ids, g_ids = rollout_sglang(
+                prompts=prompts_arg,
+                group_size=self.config.group_size,
+                sglang_url=self.config.sglang_url,
+                model_name=model_id,
+                tokenizer=self.tokenizer,
+                max_tokens=self.config.max_completion_length,
+                max_workers=self.config.sglang_concurrent,
+                max_prompt_length=self.config.max_prompt_length,
+            )
+            return completions, p_ids, g_ids, new_adapter
 
         for epoch in range(self.config.num_epochs):
             self.model.train()
@@ -596,7 +619,14 @@ class RLCRTrainer:
                         labels.append(s["label"])
 
                 if rollout_future is not None:
-                    all_completions, all_prompt_ids, all_gen_ids = rollout_future.result()
+                    result = rollout_future.result()
+                    if len(result) == 4:
+                        all_completions, all_prompt_ids, all_gen_ids, new_adapter = result
+                        if new_adapter:
+                            current_adapter = new_adapter
+                            sglang_model = f"{self.config.model_name}:{current_adapter}"
+                    else:
+                        all_completions, all_prompt_ids, all_gen_ids = result
                     rollout_future = None
                 elif use_sglang:
                     all_completions, all_prompt_ids, all_gen_ids = _do_rollout(prompts)
@@ -808,17 +838,13 @@ class RLCRTrainer:
                     self.model.save_pretrained(str(save_path))
                     self.tokenizer.save_pretrained(str(save_path))
 
-                # Prefetch: sync LoRA and start next batch's SGLang
-                # rollout in background. True overlap when SGLang is on
-                # separate GPUs; still helps on single-GPU (HTTP IO overlap).
+                # VERL-style async prefetch: LoRA sync + next rollout both run
+                # in background thread — main thread is free immediately after
+                # the gradient step (logs, checkpoints, batch prep overlap).
                 if use_sglang and rollout_future is None:
                     is_last_batch = (bi == len(batch_starts) - 1)
                     next_epoch = epoch + (1 if is_last_batch else 0)
                     if next_epoch < self.config.num_epochs:
-                        current_adapter = _sync_lora_to_sglang(
-                            self.model, self.config.sglang_url, adapter_sync_dir,
-                        )
-                        sglang_model = f"{self.config.model_name}:{current_adapter}"
                         if is_last_batch:
                             next_indices = torch.randperm(len(train_dataset))
                             n_bs = batch_starts[0]
@@ -838,8 +864,9 @@ class RLCRTrainer:
                                 next_prompts.append(
                                     train_dataset[int(ei.item())]["prompt"]
                                 )
+                        # Submit sync+rollout as one atomic background task
                         rollout_future = prefetch_pool.submit(
-                            _do_rollout, next_prompts,
+                            _sync_then_rollout, next_prompts,
                         )
 
             logger.info(f"Epoch {epoch + 1}/{self.config.num_epochs} complete")

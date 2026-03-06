@@ -137,7 +137,7 @@ model:
     host: "127.0.0.1"
     port: 30000
     mem_fraction: 0.90
-    mem_fraction_training: 0.85
+    mem_fraction_training: 0.40
     tp_size: 2
     gpu_ids: "0,1"
 

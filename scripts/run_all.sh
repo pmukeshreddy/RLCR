@@ -221,11 +221,12 @@ if [ "$NUM_GPUS" -ge 4 ]; then
     SGLANG_MEM=0.85
     echo "[*] 4-GPU mode: SGLang on GPUs 0,1 (tp=2), Training on GPUs 2,3"
 elif [ "$NUM_GPUS" -ge 2 ]; then
-    SGLANG_TP=1
-    SGLANG_GPUS="0"
+    SGLANG_TP=2
+    SGLANG_GPUS="0,1"
     TRAIN_GPUS="1"
-    SGLANG_MEM=0.85
-    echo "[*] 2-GPU mode: SGLang on GPU 0, Training on GPU 1 (true async overlap)"
+    SGLANG_MEM=0.40
+    export SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=True
+    echo "[*] 2-GPU mode: SGLang TP=2 (both GPUs), Training on GPU 1 — VERL-style"
 else
     SGLANG_TP=1
     SGLANG_GPUS=""
