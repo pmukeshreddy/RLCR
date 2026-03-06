@@ -30,6 +30,7 @@ cd "$PROJECT_DIR"
 NO_SGLANG=false
 BASELINE_ONLY=false
 QUICK=false
+SKIP_TRAINING=false
 CONFIG="configs/default.yaml"
 SGLANG_PID=""
 SGLANG_PORT=30000
@@ -39,6 +40,7 @@ for arg in "$@"; do
         --no-sglang) NO_SGLANG=true ;;
         --baseline-only) BASELINE_ONLY=true ;;
         --quick) QUICK=true ;;
+        --skip-training) SKIP_TRAINING=true ;;
         --config=*) CONFIG="${arg#*=}" ;;
     esac
 done
@@ -71,6 +73,7 @@ echo " Config: $CONFIG"
 echo " SGLang: $([ "$NO_SGLANG" = true ] && echo 'disabled' || echo 'enabled (default)')"
 echo " Baseline only: $BASELINE_ONLY"
 echo " Quick mode: $QUICK"
+echo " Skip training: $([ "$SKIP_TRAINING" = true ] && echo 'YES (using outputs/dapo/)' || echo 'no')"
 echo "============================================="
 echo ""
 
@@ -230,22 +233,34 @@ else
     echo "[*] Single-GPU mode: SGLang + Training sharing GPU"
 fi
 
-if [ "$NO_SGLANG" = false ]; then
+if [ "$SKIP_TRAINING" = true ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo " Step 4: Launch SGLang for Rollout Generation"
+    echo " Step 4+5: SKIPPED (--skip-training)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "[$(date +%H:%M:%S)] Starting..."
-    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" "$SGLANG_MEM" true "$SGLANG_TP" "$SGLANG_GPUS"
-    echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
-fi
+    if [ ! -d "outputs/dapo" ]; then
+        echo "[✗] outputs/dapo/ not found — run without --skip-training first"
+        exit 1
+    fi
+    echo "[✓] Using pre-trained adapters from outputs/dapo/"
+else
+    if [ "$NO_SGLANG" = false ]; then
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo " Step 4: Launch SGLang for Rollout Generation"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "[$(date +%H:%M:%S)] Starting..."
+        launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" "$SGLANG_MEM" true "$SGLANG_TP" "$SGLANG_GPUS"
+        echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
+    fi
 
-TRAIN_ENV="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
-if [ -n "$TRAIN_GPUS" ]; then
-    TRAIN_ENV="$TRAIN_ENV CUDA_VISIBLE_DEVICES=$TRAIN_GPUS"
+    TRAIN_ENV="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+    if [ -n "$TRAIN_GPUS" ]; then
+        TRAIN_ENV="$TRAIN_ENV CUDA_VISIBLE_DEVICES=$TRAIN_GPUS"
+    fi
+    run_step 5 "DAPO Training (load once, swap LoRA per team)" \
+        "$TRAIN_ENV python scripts/05_grpo_train.py $TRAIN_ARGS"
 fi
-run_step 5 "DAPO Training (load once, swap LoRA per team)" \
-    "$TRAIN_ENV python scripts/05_grpo_train.py $TRAIN_ARGS"
 
 # =============================================
 # Kill SGLang, relaunch with full memory (0.90) for eval
