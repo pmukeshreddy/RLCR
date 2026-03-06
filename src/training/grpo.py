@@ -32,6 +32,7 @@ If SGLang is unavailable, falls back to local generation (slower but functional)
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -158,19 +159,25 @@ def _sync_lora_to_sglang(model, sglang_url: str, adapter_dir: str) -> str | None
     new_name = f"policy_v{_sync_version}"
     old_name = f"policy_v{_sync_version - 1}" if _sync_version > 0 else None
 
-    try:
-        resp = requests.post(
-            f"{sglang_url}/load_lora_adapter",
-            json={
-                "lora_name": new_name,
-                "lora_path": str(adapter_path.resolve()),
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-    except Exception as e:
-        logger.warning(f"LoRA sync to SGLang failed (v{_sync_version}): {e}")
-        return None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                f"{sglang_url}/load_lora_adapter",
+                json={
+                    "lora_name": new_name,
+                    "lora_path": str(adapter_path.resolve()),
+                },
+                timeout=120,
+            )
+            resp.raise_for_status()
+            break
+        except Exception as e:
+            if attempt < 2:
+                logger.warning(f"LoRA sync attempt {attempt+1}/3 failed: {e}, retrying...")
+                time.sleep(5)
+            else:
+                logger.warning(f"LoRA sync to SGLang failed (v{_sync_version}): {e}")
+                return None
 
     if old_name:
         try:
