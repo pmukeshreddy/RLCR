@@ -710,39 +710,43 @@ class RLCRTrainer:
                         ).squeeze(-1)
                     return token_logprobs
 
-                # Build per-sequence gen-token index tensor (padded with 0)
+                # Build padded index, mask, and advantage tensors (once each)
                 gen_ids_padded = torch.zeros(
                     n_seqs, max_len, dtype=torch.long, device=device
+                )
+                gen_mask = torch.zeros(
+                    n_seqs, max_len, dtype=torch.bool, device=device
+                )
+                adv_padded = torch.zeros(
+                    n_seqs, max_len, dtype=torch.float32, device=device
                 )
                 for k, s in enumerate(sequences):
                     pl, gl = s["prompt_len"], s["gen_len"]
                     gen_ids_padded[k, pl - 1 : pl - 1 + gl] = batch_ids[k, pl : pl + gl]
+                    gen_mask[k, pl - 1 : pl - 1 + gl] = True
+                    adv_padded[k, pl - 1 : pl - 1 + gl] = s["advantage"]
 
                 # Micro-batch size — safe with selective (no full vocab tensor)
                 _FWD_MB = 16
 
-                # Phase 3: Compute old log-probs (reference, no gradient)
-                old_token_lps = []
+                # Phase 3: Compute old log-probs into contiguous tensor
+                old_lps_full = torch.zeros(
+                    n_seqs, max_len, dtype=torch.float32, device=device
+                )
                 with torch.no_grad():
                     for mb_s in range(0, n_seqs, _FWD_MB):
                         mb_e = min(mb_s + _FWD_MB, n_seqs)
                         mb_logits = self.model(
                             input_ids=batch_ids[mb_s:mb_e],
                             attention_mask=batch_mask[mb_s:mb_e],
-                        ).logits                                           # (mb, T, V)
-                        mb_lps = selective_log_softmax(
+                        ).logits
+                        old_lps_full[mb_s:mb_e] = selective_log_softmax(
                             mb_logits, gen_ids_padded[mb_s:mb_e]
-                        )                                                  # (mb, T)
-                        for k_local, k_global in enumerate(range(mb_s, mb_e)):
-                            s = sequences[k_global]
-                            pl, gl = s["prompt_len"], s["gen_len"]
-                            old_token_lps.append(
-                                mb_lps[k_local, pl - 1 : pl - 1 + gl]
-                            )
-                        del mb_logits, mb_lps
+                        ).float()
+                        del mb_logits
 
-                # Phase 4: PPO inner loop with DAPO Clip-Higher
-                total_tokens_all = sum(s["gen_len"] for s in sequences)
+                # Phase 4: PPO inner loop — fully batched tensor ops
+                total_tokens_all = gen_mask.sum().item()
                 step_loss = 0.0
 
                 for ppo_step in range(self.config.ppo_epochs):
@@ -756,34 +760,29 @@ class RLCRTrainer:
                         logits = self.model(
                             input_ids=batch_ids[mb_s:mb_e],
                             attention_mask=batch_mask[mb_s:mb_e],
-                        ).logits                                           # (mb, T, V)
+                        ).logits
                         new_lps = selective_log_softmax(
                             logits, gen_ids_padded[mb_s:mb_e]
-                        )                                                  # (mb, T)
+                        ).float()
 
-                        mb_loss = torch.tensor(0.0, device=device)
-                        for k_local, k_global in enumerate(range(mb_s, mb_e)):
-                            s = sequences[k_global]
-                            pl, gl = s["prompt_len"], s["gen_len"]
-                            new_token_lps = new_lps[k_local, pl - 1 : pl - 1 + gl]
+                        mb_mask = gen_mask[mb_s:mb_e]
+                        mb_old  = old_lps_full[mb_s:mb_e]
+                        mb_adv  = adv_padded[mb_s:mb_e]
 
-                            ratio = torch.exp(new_token_lps - old_token_lps[k_global])
-                            clipped_ratio = torch.clamp(
-                                ratio, 1.0 - eps_low, 1.0 + eps_high
-                            )
-
-                            adv = s["advantage"]
-                            surr1 = ratio * adv
-                            surr2 = clipped_ratio * adv
-                            mb_loss += -torch.min(surr1, surr2).sum()
-
-                            with torch.no_grad():
-                                clip_frac += (ratio != clipped_ratio).float().sum().item()
-                                n_clip_tokens += gl
+                        ratio   = torch.exp((new_lps - mb_old) * mb_mask)
+                        clipped = torch.clamp(ratio, 1.0 - eps_low, 1.0 + eps_high)
+                        surr1   = ratio * mb_adv
+                        surr2   = clipped * mb_adv
+                        mb_loss = -(torch.min(surr1, surr2) * mb_mask).sum()
 
                         if total_tokens_all > 0:
                             (mb_loss / total_tokens_all).backward()
                             total_loss_val += mb_loss.item()
+
+                        with torch.no_grad():
+                            clip_frac   += ((ratio != clipped) & mb_mask).sum().item()
+                            n_clip_tokens += mb_mask.sum().item()
+
                         del logits, new_lps, mb_loss
 
                     if total_tokens_all > 0:
@@ -796,7 +795,7 @@ class RLCRTrainer:
                         step_loss = total_loss_val / total_tokens_all
                         optim_step += 1
 
-                del batch_ids, batch_mask, old_token_lps, gen_ids_padded
+                del batch_ids, batch_mask, old_lps_full, gen_ids_padded, gen_mask, adv_padded
                 torch.cuda.empty_cache()
 
                 log_every = min(self.config.logging_steps, max(total_batches // 3, 1))
