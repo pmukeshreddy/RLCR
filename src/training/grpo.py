@@ -688,22 +688,16 @@ class RLCRTrainer:
                 # so we do per-row log_softmax + immediate gather — same memory
                 # savings, correct numerics. Matches TRL/veRL implementation.
                 def selective_log_softmax(logits, index):
-                    """logits: (B, T, V), index: (B, T) → (B, T) token log-probs."""
-                    if logits.dtype in (torch.float32, torch.float64):
-                        logsumexp = torch.logsumexp(logits, dim=-1)
-                        selected = logits.gather(-1, index.unsqueeze(-1)).squeeze(-1)
-                        return selected - logsumexp
-                    # bf16: per-row log_softmax for correct internal upcast
-                    token_logprobs = torch.zeros(
-                        logits.shape[0], logits.shape[1],
-                        dtype=logits.dtype, device=logits.device,
-                    )
-                    for i in range(logits.shape[0]):
-                        lp = logits[i].log_softmax(dim=-1)
-                        token_logprobs[i] = lp.gather(
-                            -1, index[i].unsqueeze(-1)
-                        ).squeeze(-1)
-                    return token_logprobs
+                    """logits: (B, T, V), index: (B, T) → (B, T) token log-probs.
+
+                    Upcasts to float32 before logsumexp for numerical stability
+                    (bf16 logsumexp is unstable). One upcast, zero loops.
+                    """
+                    if logits.dtype not in (torch.float32, torch.float64):
+                        logits = logits.float()
+                    logsumexp = torch.logsumexp(logits, dim=-1)
+                    selected = logits.gather(-1, index.unsqueeze(-1)).squeeze(-1)
+                    return selected - logsumexp
 
                 # Build padded index, mask, and advantage tensors (once each)
                 gen_ids_padded = torch.zeros(
