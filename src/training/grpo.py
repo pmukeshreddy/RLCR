@@ -385,6 +385,8 @@ class RLCRTrainer:
             target_modules=self.config.lora_target_modules or ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
         )
         self.model = get_peft_model(self.model, lora_config)
+        self.model.enable_input_require_grads()
+        self.model.gradient_checkpointing_enable()
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.model.parameters())
         logger.info(f"Trainable parameters: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
@@ -921,6 +923,8 @@ def train_all_teams(
             target_modules=lora_target,
         )
         peft_model = get_peft_model(base_model, lora_cfg)
+        peft_model.enable_input_require_grads()
+        peft_model.gradient_checkpointing_enable()
 
         trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in peft_model.parameters())
