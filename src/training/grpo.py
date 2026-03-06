@@ -376,9 +376,6 @@ class RLCRTrainer:
             )
         if torch.cuda.is_available():
             self.model.to("cuda")
-        self.model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": False}
-        )
 
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -611,8 +608,6 @@ class RLCRTrainer:
                         max_tokens=self.config.max_completion_length,
                         max_prompt_length=self.config.max_prompt_length,
                     )
-                torch.cuda.empty_cache()
-
                 if batch_start == 0:
                     sample = all_completions[0][0][0]["content"][:300]
                     logger.info(f"  [Epoch {epoch}] Sample completion: {sample!r}")
@@ -727,7 +722,7 @@ class RLCRTrainer:
                     adv_padded[k, pl - 1 : pl - 1 + gl] = s["advantage"]
 
                 # Micro-batch size — safe with selective (no full vocab tensor)
-                _FWD_MB = 16
+                _FWD_MB = 128
 
                 # Phase 3: Compute old log-probs into contiguous tensor
                 old_lps_full = torch.zeros(
@@ -796,7 +791,6 @@ class RLCRTrainer:
                         optim_step += 1
 
                 del batch_ids, batch_mask, old_lps_full, gen_ids_padded, gen_mask, adv_padded
-                torch.cuda.empty_cache()
 
                 log_every = min(self.config.logging_steps, max(total_batches // 3, 1))
                 if global_step % log_every == 0 or global_step == total_batches:
@@ -915,9 +909,6 @@ def train_all_teams(
         base_model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     if torch.cuda.is_available():
         base_model.to(train_device)
-    base_model.gradient_checkpointing_enable(
-        gradient_checkpointing_kwargs={"use_reentrant": False}
-    )
 
     lora_target = config_dict.get("lora_target_modules", ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
     sglang_url = config_dict.get("sglang_url")
