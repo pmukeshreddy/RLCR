@@ -1,13 +1,25 @@
 """Reward functions for DAPO training on code review filtering.
 
-Two-component reward (only when output is parseable):
-  1. Shaped correctness (weight 0.8): distance-based, rewards calibration.
+Three-component reward (RLBFF-style: continuous + binary verifiable + format):
+  1. Shaped correctness (weight 0.5): distance-based, smooth gradients.
      reward = (1 - |score - label|) * 2 - 1  → maps to [-1, +1]
-  2. Format compliance (weight 0.2): did the model produce parseable
-     <think>/<score>/<decision> tags? +1 for clean output, 0 for garbage.
+  2. Binary decision reward (weight 0.3): uses <decision>SURFACE/FILTER</decision>
+     as a verifiable binary signal (RLBFF). Asymmetric penalties:
+       True positive  (SURFACE, label=1): +0.5
+       True negative  (FILTER,  label=0): +0.5
+       False positive (SURFACE, label=0): -1.5  ← strong: reduces noise
+       False negative (FILTER,  label=1): -0.3  ← mild: don't miss too much
+  3. Format compliance (weight 0.2): +1 for all three tags, -1 for garbage.
 
 Unparseable output (no extractable score) → flat -1.0 penalty.
 Plus DAPO overlong reward shaping for completions exceeding expected length.
+
+Design rationale (Greptile use case):
+  Greptile's value prop is reducing review noise (4x faster merges).
+  False positives (surfacing irrelevant comments) destroy developer trust.
+  False negatives (missing relevant comments) are recoverable.
+  Asymmetric penalty: FP = 5x more penalized than FN.
+  Ref: RLBFF (Wang et al., 2025) — binary verifiable rewards for nuanced quality.
 """
 
 from __future__ import annotations
@@ -72,15 +84,23 @@ def _check_format(text: str) -> float:
 
 
 class CodeReviewReward:
-    """Two-component reward for code review filtering.
+    """Three-component reward for code review filtering (RLBFF-style).
 
-    Shaped correctness (0.8): rewards calibrated predictions.
-    Format compliance (0.2): rewards structured output.
+    Shaped correctness (0.5): smooth gradient signal.
+    Binary decision reward (0.3): precision-focused verifiable signal.
+    Format compliance (0.2): structured output incentive.
     Plus DAPO overlong penalty.
     """
 
-    CORRECTNESS_WEIGHT = 0.8
+    CORRECTNESS_WEIGHT = 0.5
+    DECISION_WEIGHT = 0.3
     FORMAT_WEIGHT = 0.2
+
+    # Asymmetric decision penalties (FP >> FN for noise reduction)
+    TP_BONUS = 0.5   # SURFACE, label=1 — correct surface
+    TN_BONUS = 0.5   # FILTER,  label=0 — correct filter
+    FP_PENALTY = -1.5  # SURFACE, label=0 — noisy comment surfaced
+    FN_PENALTY = -0.3  # FILTER,  label=1 — relevant comment missed
 
     def __init__(
         self,
@@ -116,13 +136,33 @@ class CodeReviewReward:
         if score is None:
             return -1.0, 0.5
 
+        # Component 1: shaped correctness (smooth gradients)
         correctness = (1.0 - abs(score - float(label))) * 2.0 - 1.0
 
+        # Component 2: binary decision reward (RLBFF verifiable signal)
+        # Use <decision> tag if present, else fall back to score threshold
+        decision_match = _DECISION_RE.search(text)
+        if decision_match:
+            predict = 1 if decision_match.group(1).upper() == "SURFACE" else 0
+        else:
+            predict = 1 if score >= 0.5 else 0
+
+        if predict == 1 and label == 1:
+            decision_reward = self.TP_BONUS
+        elif predict == 0 and label == 0:
+            decision_reward = self.TN_BONUS
+        elif predict == 1 and label == 0:
+            decision_reward = self.FP_PENALTY
+        else:
+            decision_reward = self.FN_PENALTY
+
+        # Component 3: format compliance
         fmt = _check_format(text)
         format_reward = fmt * 2.0 - 1.0
 
         reward = (
             self.CORRECTNESS_WEIGHT * correctness
+            + self.DECISION_WEIGHT * decision_reward
             + self.FORMAT_WEIGHT * format_reward
         )
 
