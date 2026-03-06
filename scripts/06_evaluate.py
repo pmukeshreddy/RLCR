@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--no-sglang", action="store_true", help="Force local HF inference instead of SGLang")
     parser.add_argument("--skip-rl", action="store_true", help="Skip RL eval (baseline only)")
+    parser.add_argument("--skip-baseline", action="store_true", help="Skip embedding baseline (RL only)")
     args = parser.parse_args()
 
     cfg = load_config(config_path=args.config)
@@ -63,7 +64,10 @@ def main():
     )
 
     # --- Baseline Cold-Start Evaluation ---
-    console.rule("[bold]Embedding Baseline Cold-Start[/bold]")
+    if args.skip_baseline:
+        console.print("[yellow]Skipping embedding baseline (--skip-baseline)[/yellow]")
+    else:
+        console.rule("[bold]Embedding Baseline Cold-Start[/bold]")
     baseline_kwargs = {
         "model_name": cfg.baseline.embedding_model,
         "dim": cfg.baseline.embedding_dim,
@@ -73,15 +77,16 @@ def main():
         "batch_size": cfg.baseline.batch_size,
     }
 
-    for team_name, team in simulator.teams.items():
-        console.print(f"\n[cyan]Evaluating baseline: {team_name}[/cyan]")
-        cold_start.evaluate_embedding_baseline(
-            baseline_cls=EmbeddingFilter,
-            baseline_kwargs=baseline_kwargs,
-            team_name=team_name,
-            all_train_samples=team.train_samples,
-            test_samples=team.test_samples,
-        )
+    if not args.skip_baseline:
+        for team_name, team in simulator.teams.items():
+            console.print(f"\n[cyan]Evaluating baseline: {team_name}[/cyan]")
+            cold_start.evaluate_embedding_baseline(
+                baseline_cls=EmbeddingFilter,
+                baseline_kwargs=baseline_kwargs,
+                team_name=team_name,
+                all_train_samples=team.train_samples,
+                test_samples=team.test_samples,
+            )
 
     # --- RL Cold-Start Evaluation ---
     rl_metrics_per_team = {}

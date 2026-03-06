@@ -338,7 +338,7 @@ class ReviewScorer:
         team_name: str,
         team_description: str,
         vote_history: list[dict],
-        max_workers: int = 8,
+        max_workers: int = 64,
     ) -> list[ModelOutput]:
         """Score multiple samples concurrently via SGLang (or sequentially for local)."""
         if not self.use_sglang or len(samples) <= 1:

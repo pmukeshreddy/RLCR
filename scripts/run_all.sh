@@ -41,6 +41,7 @@ for arg in "$@"; do
         --baseline-only) BASELINE_ONLY=true ;;
         --quick) QUICK=true ;;
         --skip-training) SKIP_TRAINING=true ;;
+        --skip-baseline) SKIP_BASELINE=true ;;
         --config=*) CONFIG="${arg#*=}" ;;
     esac
 done
@@ -267,6 +268,9 @@ fi
 # =============================================
 
 EVAL_ARGS="--config $CONFIG"
+if [ "$SKIP_BASELINE" = true ]; then
+    EVAL_ARGS="$EVAL_ARGS --skip-baseline"
+fi
 if [ "$NO_SGLANG" = true ]; then
     EVAL_ARGS="$EVAL_ARGS --no-sglang"
 else
