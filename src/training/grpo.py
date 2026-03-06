@@ -716,7 +716,7 @@ class RLCRTrainer:
                     adv_padded[k, pl - 1 : pl - 1 + gl] = s["advantage"]
 
                 # Micro-batch size — safe with selective (no full vocab tensor)
-                _FWD_MB = 128
+                _FWD_MB = 32
 
                 # Phase 3: Compute old log-probs into contiguous tensor
                 old_lps_full = torch.zeros(
@@ -910,9 +910,6 @@ def train_all_teams(
 
     results = {}
     for idx, team_name in enumerate(team_names):
-        global _sync_version
-        _sync_version = 0
-
         team = teams[team_name]
         logger.info(f"[{idx+1}/{len(team_names)}] Training team: {team_name}")
 
