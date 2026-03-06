@@ -74,6 +74,7 @@ def build_verl_command(
     val_parquet: str,
     config_dict: dict,
     output_dir: str,
+    n_train_samples: int = 0,
 ) -> list[str]:
     """Generate the veRL CLI command for a single team's GRPO training.
 
@@ -86,6 +87,8 @@ def build_verl_command(
     num_epochs = config_dict.get("num_epochs", 5)
     group_size = config_dict.get("group_size", 8)
     batch_size = config_dict.get("per_device_batch_size", 8) * group_size
+    if n_train_samples > 0:
+        batch_size = min(batch_size, n_train_samples)
     ppo_epochs = config_dict.get("ppo_epochs", 2)
     max_completion = config_dict.get("max_completion_length", 128)
     n_gpus = config_dict.get("n_gpus", 2)
@@ -179,6 +182,7 @@ def train_team_verl(
         val_parquet=val_parquet,
         config_dict=config_dict,
         output_dir=output_dir,
+        n_train_samples=len(train_dicts),
     )
 
     logger.info(f"[veRL] Training team: {team_name}")
