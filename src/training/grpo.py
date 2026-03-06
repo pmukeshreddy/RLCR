@@ -716,7 +716,7 @@ class RLCRTrainer:
                     adv_padded[k, pl - 1 : pl - 1 + gl] = s["advantage"]
 
                 # Micro-batch size — safe with selective (no full vocab tensor)
-                _FWD_MB = 32
+                _FWD_MB = 8
 
                 # Phase 3: Compute old log-probs into contiguous tensor
                 old_lps_full = torch.zeros(
