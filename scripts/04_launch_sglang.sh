@@ -23,6 +23,8 @@ cd "$PROJECT_DIR"
 MODEL="${1:-Qwen/Qwen3-4B}"
 PORT="${2:-30000}"
 ENABLE_LORA="${3:-false}"
+TP_SIZE="${4:-1}"
+GPU_IDS="${5:-}"
 
 echo "============================================="
 echo " Step 4: SGLang Server"
@@ -30,6 +32,8 @@ echo "============================================="
 echo " Model: $MODEL"
 echo " Port:  $PORT"
 echo " LoRA:  $ENABLE_LORA"
+echo " TP:    $TP_SIZE"
+echo " GPUs:  ${GPU_IDS:-auto}"
 echo "============================================="
 
 # Check if already healthy
@@ -49,6 +53,8 @@ server = SGLangServer(
     port=${PORT},
     enable_lora='${ENABLE_LORA}' == 'true',
     max_lora_rank=32,
+    tp_size=${TP_SIZE},
+    gpu_ids='${GPU_IDS}' if '${GPU_IDS}' else None,
 )
 if server.start():
     print()

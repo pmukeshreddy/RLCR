@@ -137,7 +137,9 @@ model:
     host: "127.0.0.1"
     port: 30000
     mem_fraction: 0.90
-    mem_fraction_training: 0.45
+    mem_fraction_training: 0.85
+    tp_size: 2
+    gpu_ids: "0,1"
 
 training:
   method: "dapo"
@@ -149,7 +151,7 @@ training:
   dapo:
     group_size: 16
     learning_rate: 2.0e-5
-    num_epochs: 3
+    num_epochs: 2
     per_device_batch_size: 8
     ppo_epochs: 2
     warmup_ratio: 0.1

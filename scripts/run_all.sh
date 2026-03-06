@@ -106,13 +106,23 @@ launch_sglang() {
     local port="${2:-$SGLANG_PORT}"
     local mem_frac="${3:-0.85}"
     local enable_lora="${4:-false}"
+    local tp_size="${5:-1}"
+    local gpu_ids="${6:-}"
 
-    echo "[*] Launching SGLang: $model on port $port (mem_fraction=$mem_frac, lora=$enable_lora)"
+    echo "[*] Launching SGLang: $model on port $port (mem_fraction=$mem_frac, lora=$enable_lora, tp=$tp_size, gpus=$gpu_ids)"
     local lora_flags=""
     if [ "$enable_lora" = true ]; then
         lora_flags="--enable-lora --max-lora-rank 32 --lora-target-modules q_proj v_proj k_proj o_proj gate_proj up_proj down_proj --max-loras-per-batch 2 --disable-cuda-graph"
     fi
-    python -m sglang.launch_server \
+    local tp_flag=""
+    if [ "$tp_size" -gt 1 ]; then
+        tp_flag="--tp $tp_size"
+    fi
+    local env_prefix=""
+    if [ -n "$gpu_ids" ]; then
+        env_prefix="CUDA_VISIBLE_DEVICES=$gpu_ids"
+    fi
+    env $env_prefix python -m sglang.launch_server \
         --model-path "$model" \
         --host 127.0.0.1 \
         --port "$port" \
@@ -120,6 +130,7 @@ launch_sglang() {
         --trust-remote-code \
         --log-level warning \
         --enable-flashinfer \
+        $tp_flag \
         $lora_flags \
         > "$LOG_DIR/sglang_${port}.log" 2>&1 &
     SGLANG_PID=$!
@@ -198,18 +209,37 @@ if [ "$QUICK" = true ]; then
     SGLANG_MODEL="Qwen/Qwen3-1.7B"
 fi
 
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l || echo "1")
+if [ "$NUM_GPUS" -ge 4 ]; then
+    SGLANG_TP=2
+    SGLANG_GPUS="0,1"
+    TRAIN_GPUS="2,3"
+    SGLANG_MEM=0.85
+    echo "[*] 4-GPU mode: SGLang on GPUs 0,1 (tp=2), Training on GPUs 2,3"
+else
+    SGLANG_TP=1
+    SGLANG_GPUS=""
+    TRAIN_GPUS=""
+    SGLANG_MEM=0.45
+    echo "[*] Single-GPU mode: SGLang + Training sharing GPU"
+fi
+
 if [ "$NO_SGLANG" = false ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo " Step 4: Launch SGLang for Rollout Generation"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$(date +%H:%M:%S)] Starting..."
-    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.45 true
+    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" "$SGLANG_MEM" true "$SGLANG_TP" "$SGLANG_GPUS"
     echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
 fi
 
+TRAIN_ENV=""
+if [ -n "$TRAIN_GPUS" ]; then
+    TRAIN_ENV="CUDA_VISIBLE_DEVICES=$TRAIN_GPUS"
+fi
 run_step 5 "DAPO Training (load once, swap LoRA per team)" \
-    "python scripts/05_grpo_train.py $TRAIN_ARGS"
+    "$TRAIN_ENV python scripts/05_grpo_train.py $TRAIN_ARGS"
 
 # =============================================
 # Kill SGLang, relaunch with full memory (0.90) for eval
@@ -225,7 +255,7 @@ else
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$(date +%H:%M:%S)] Starting..."
     kill_sglang_on_port "$SGLANG_PORT"
-    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.90
+    launch_sglang "$SGLANG_MODEL" "$SGLANG_PORT" 0.90 false "$SGLANG_TP" "$SGLANG_GPUS"
     echo "[$(date +%H:%M:%S)] ✓ Step 4b complete"
 fi
 

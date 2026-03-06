@@ -43,6 +43,8 @@ class SGLangServer:
         log_dir: str = "results/logs",
         enable_lora: bool = False,
         max_lora_rank: int = 32,
+        tp_size: int = 1,
+        gpu_ids: str | None = None,
     ):
         self.model_name = model_name
         self.host = host
@@ -52,6 +54,8 @@ class SGLangServer:
         self.log_dir = Path(log_dir)
         self.enable_lora = enable_lora
         self.max_lora_rank = max_lora_rank
+        self.tp_size = tp_size
+        self.gpu_ids = gpu_ids
         self.process: subprocess.Popen | None = None
         self._registered_cleanup = False
 
@@ -99,6 +103,8 @@ class SGLangServer:
             "--trust-remote-code",
             "--log-level", "warning",
         ]
+        if self.tp_size > 1:
+            cmd += ["--tp", str(self.tp_size)]
         if self.enable_lora:
             cmd += [
                 "--enable-lora",
@@ -110,8 +116,12 @@ class SGLangServer:
                 "--disable-cuda-graph",
             ]
 
-        logger.info(f"Starting SGLang: {self.model_name} on {self.url}")
+        logger.info(f"Starting SGLang: {self.model_name} on {self.url} (tp={self.tp_size})")
         logger.info(f"  Log: {log_file}")
+
+        env = os.environ.copy()
+        if self.gpu_ids:
+            env["CUDA_VISIBLE_DEVICES"] = self.gpu_ids
 
         with open(log_file, "w") as lf:
             self.process = subprocess.Popen(
@@ -119,6 +129,7 @@ class SGLangServer:
                 stdout=lf,
                 stderr=subprocess.STDOUT,
                 preexec_fn=os.setsid,
+                env=env,
             )
 
         if not self._registered_cleanup:

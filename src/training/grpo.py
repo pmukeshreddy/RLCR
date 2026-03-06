@@ -65,7 +65,7 @@ class GRPORunConfig:
     lora_target_modules: list[str] | None = None
     group_size: int = 16
     learning_rate: float = 5e-6
-    num_epochs: int = 3
+    num_epochs: int = 2
     per_device_batch_size: int = 8
     gradient_accumulation_steps: int = 1  # only used by TRL path
     ppo_epochs: int = 2
@@ -544,13 +544,32 @@ class RLCRTrainer:
         total_groups_seen = 0
         n_reward_samples = 0
 
+        prefetch_pool = ThreadPoolExecutor(max_workers=1)
+        rollout_future = None
+        sglang_model = (
+            f"{self.config.model_name}:{current_adapter}" if use_sglang and current_adapter else None
+        )
+
+        def _do_rollout(prompts_arg):
+            return rollout_sglang(
+                prompts=prompts_arg,
+                group_size=self.config.group_size,
+                sglang_url=self.config.sglang_url,
+                model_name=sglang_model,
+                tokenizer=self.tokenizer,
+                max_tokens=self.config.max_completion_length,
+                max_workers=self.config.sglang_concurrent,
+                max_prompt_length=self.config.max_prompt_length,
+            )
+
         for epoch in range(self.config.num_epochs):
             self.model.train()
             indices = torch.randperm(len(train_dataset))
-
-            for batch_start in range(
+            batch_starts = list(range(
                 0, len(train_dataset), self.config.per_device_batch_size
-            ):
+            ))
+
+            for bi, batch_start in enumerate(batch_starts):
                 batch_idx = indices[
                     batch_start : batch_start + self.config.per_device_batch_size
                 ]
@@ -558,27 +577,12 @@ class RLCRTrainer:
                 prompts = [b["prompt"] for b in batch]
                 labels = [b["label"] for b in batch]
 
-                # Phase 1: Sync LoRA → SGLang, then generate (on-policy)
-                # Skip first-batch sync — setup already loaded the adapter.
-                # Re-syncing would create a new version while unloading the
-                # working one, causing empty completions on the first batch.
-                if use_sglang and global_step > 0:
-                    current_adapter = _sync_lora_to_sglang(
-                        self.model, self.config.sglang_url, adapter_sync_dir,
-                    )
-
-                if use_sglang:
-                    sglang_model = f"{self.config.model_name}:{current_adapter}"
-                    all_completions, all_prompt_ids, all_gen_ids = rollout_sglang(
-                        prompts=prompts,
-                        group_size=self.config.group_size,
-                        sglang_url=self.config.sglang_url,
-                        model_name=sglang_model,
-                        tokenizer=self.tokenizer,
-                        max_tokens=self.config.max_completion_length,
-                        max_workers=self.config.sglang_concurrent,
-                        max_prompt_length=self.config.max_prompt_length,
-                    )
+                # Phase 1: Get rollout — either from prefetch or generate now
+                if rollout_future is not None:
+                    all_completions, all_prompt_ids, all_gen_ids = rollout_future.result()
+                    rollout_future = None
+                elif use_sglang:
+                    all_completions, all_prompt_ids, all_gen_ids = _do_rollout(prompts)
                 else:
                     all_completions, all_prompt_ids, all_gen_ids = rollout_local(
                         prompts=prompts,
@@ -708,7 +712,7 @@ class RLCRTrainer:
 
                 # Micro-batch forward passes to avoid materialising
                 # a single (n_seqs, max_len, vocab) logits tensor (~6 GiB).
-                _FWD_MB = 8
+                _FWD_MB = 16
 
                 # Phase 3: Compute old log-probs (reference, no gradient)
                 old_token_lps = []
@@ -817,8 +821,36 @@ class RLCRTrainer:
                     self.model.save_pretrained(str(save_path))
                     self.tokenizer.save_pretrained(str(save_path))
 
+                # Prefetch: sync LoRA and start next batch's SGLang
+                # rollout in background. True overlap when SGLang is on
+                # separate GPUs; still helps on single-GPU (HTTP IO overlap).
+                if use_sglang and rollout_future is None:
+                    is_last_batch = (bi == len(batch_starts) - 1)
+                    next_epoch = epoch + (1 if is_last_batch else 0)
+                    if next_epoch < self.config.num_epochs:
+                        current_adapter = _sync_lora_to_sglang(
+                            self.model, self.config.sglang_url, adapter_sync_dir,
+                        )
+                        sglang_model = f"{self.config.model_name}:{current_adapter}"
+                        if is_last_batch:
+                            next_indices = torch.randperm(len(train_dataset))
+                            n_bs = batch_starts[0]
+                        else:
+                            next_indices = indices
+                            n_bs = batch_starts[bi + 1]
+                        n_idx = next_indices[
+                            n_bs : n_bs + self.config.per_device_batch_size
+                        ]
+                        next_prompts = [
+                            train_dataset[int(i)]["prompt"] for i in n_idx
+                        ]
+                        rollout_future = prefetch_pool.submit(
+                            _do_rollout, next_prompts,
+                        )
+
             logger.info(f"Epoch {epoch + 1}/{self.config.num_epochs} complete")
 
+        prefetch_pool.shutdown(wait=False)
         final_path = Path(self.config.output_dir)
         final_path.mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(str(final_path))
@@ -845,13 +877,20 @@ def train_all_teams(
     teams: dict,
     config_dict: dict,
 ) -> dict[str, dict]:
-    """Train all teams on a single GPU with DAPO. Loads the base model ONCE.
+    """Train all teams with DAPO. Loads the base model ONCE.
+
+    Supports multi-GPU: when CUDA_VISIBLE_DEVICES exposes 2+ GPUs,
+    loads the model on cuda:0 (first visible GPU). SGLang runs on
+    separate GPUs set by the launch script.
 
     For each team: attach fresh LoRA -> train -> save adapter -> unload LoRA.
     Base model stays resident -- zero redundant loads, minimal GPU churn.
     """
     model_name = config_dict["model_name"]
+    n_gpus = torch.cuda.device_count()
+    train_device = "cuda:0" if torch.cuda.is_available() else "cpu"
     logger.info(f"Loading base model once: {model_name}")
+    logger.info(f"Training device: {train_device} ({n_gpus} GPU(s) visible)")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -867,7 +906,7 @@ def train_all_teams(
     except (ValueError, ImportError):
         base_model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     if torch.cuda.is_available():
-        base_model.to("cuda")
+        base_model.to(train_device)
     base_model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={"use_reentrant": False}
     )
