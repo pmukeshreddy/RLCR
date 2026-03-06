@@ -31,7 +31,7 @@ NO_SGLANG=false
 BASELINE_ONLY=false
 QUICK=false
 SKIP_TRAINING=false
-USE_VERL=false
+USE_VERL=true
 CONFIG="configs/default.yaml"
 SGLANG_PID=""
 SGLANG_PORT=30000
@@ -43,7 +43,7 @@ for arg in "$@"; do
         --quick) QUICK=true ;;
         --skip-training) SKIP_TRAINING=true ;;
         --skip-baseline) SKIP_BASELINE=true ;;
-        --verl) USE_VERL=true ;;
+        --no-verl) USE_VERL=false ;;
         --config=*) CONFIG="${arg#*=}" ;;
     esac
 done
