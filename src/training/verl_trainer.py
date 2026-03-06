@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
+import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +19,6 @@ from loguru import logger
 from transformers import AutoTokenizer
 
 from src.models.scoring import format_prompt_text
-from src.training.grpo import build_training_dataset
 
 
 def _make_parquet(
@@ -69,16 +68,16 @@ def _make_parquet(
     return output_path
 
 
-def build_verl_run_script(
+def build_verl_command(
     team_name: str,
     train_parquet: str,
     val_parquet: str,
     config_dict: dict,
     output_dir: str,
-) -> str:
+) -> list[str]:
     """Generate the veRL CLI command for a single team's GRPO training.
 
-    Returns the full shell command string that invokes veRL's main_ppo entry point.
+    Returns a list of args for subprocess.run().
     """
     model_name = config_dict["model_name"]
     lora_r = config_dict.get("lora_r", 32)
@@ -91,62 +90,63 @@ def build_verl_run_script(
     max_completion = config_dict.get("max_completion_length", 128)
     n_gpus = config_dict.get("n_gpus", 2)
     clip_low = config_dict.get("clip_ratio_low", 0.2)
-    clip_high = config_dict.get("clip_ratio_high", 0.28)
 
     reward_fn_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "verl_reward.py")
     )
 
-    cmd = f"""python3 -m verl.trainer.main_ppo \\
-    algorithm.adv_estimator=grpo \\
-    data.train_files={os.path.abspath(train_parquet)} \\
-    data.val_files={os.path.abspath(val_parquet)} \\
-    data.train_batch_size={batch_size} \\
-    data.max_prompt_length=1024 \\
-    data.max_response_length={max_completion} \\
-    data.filter_overlong_prompts=True \\
-    data.truncation='error' \\
-    actor_rollout_ref.model.path={model_name} \\
-    actor_rollout_ref.model.lora_rank={lora_r} \\
-    actor_rollout_ref.model.lora_alpha={lora_alpha} \\
-    actor_rollout_ref.model.use_remove_padding=True \\
-    actor_rollout_ref.model.enable_gradient_checkpointing=True \\
-    actor_rollout_ref.actor.optim.lr={lr} \\
-    actor_rollout_ref.actor.ppo_mini_batch_size={batch_size} \\
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \\
-    actor_rollout_ref.actor.ppo_epochs={ppo_epochs} \\
-    actor_rollout_ref.actor.use_kl_loss=False \\
-    actor_rollout_ref.actor.entropy_coeff=0 \\
-    actor_rollout_ref.actor.clip_ratio={clip_low} \\
-    actor_rollout_ref.actor.clip_ratio_high={clip_high} \\
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \\
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \\
-    actor_rollout_ref.rollout.name=vllm \\
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \\
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \\
-    actor_rollout_ref.rollout.n={group_size} \\
-    actor_rollout_ref.rollout.temperature=1.2 \\
-    actor_rollout_ref.rollout.top_p=0.95 \\
-    actor_rollout_ref.rollout.load_format=safetensors \\
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \\
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \\
-    actor_rollout_ref.ref.fsdp_config.param_offload=True \\
-    algorithm.use_kl_in_reward=False \\
-    custom_reward_function.path={reward_fn_path} \\
-    custom_reward_function.name=compute_score \\
-    trainer.val_before_train=False \\
-    trainer.critic_warmup=0 \\
-    trainer.logger='["console"]' \\
-    trainer.project_name=rlcr \\
-    trainer.experiment_name=rlcr_{team_name} \\
-    trainer.n_gpus_per_node={n_gpus} \\
-    trainer.nnodes=1 \\
-    trainer.save_freq=50 \\
-    trainer.test_freq=10 \\
-    trainer.total_epochs={num_epochs} \\
-    trainer.default_local_dir={os.path.abspath(output_dir)}"""
+    args = [
+        "python3", "-m", "verl.trainer.main_ppo",
+        f"algorithm.adv_estimator=grpo",
+        f"data.train_files={os.path.abspath(train_parquet)}",
+        f"data.val_files={os.path.abspath(val_parquet)}",
+        f"data.train_batch_size={batch_size}",
+        f"data.max_prompt_length=1024",
+        f"data.max_response_length={max_completion}",
+        f"data.filter_overlong_prompts=True",
+        f"data.truncation=error",
+        f"actor_rollout_ref.model.path={model_name}",
+        f"actor_rollout_ref.model.lora_rank={lora_r}",
+        f"actor_rollout_ref.model.lora_alpha={lora_alpha}",
+        f"actor_rollout_ref.model.use_remove_padding=True",
+        f"actor_rollout_ref.model.enable_gradient_checkpointing=True",
+        f"actor_rollout_ref.actor.optim.lr={lr}",
+        f"actor_rollout_ref.actor.ppo_mini_batch_size={batch_size}",
+        f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4",
+        f"actor_rollout_ref.actor.ppo_epochs={ppo_epochs}",
+        f"actor_rollout_ref.actor.use_kl_loss=False",
+        f"actor_rollout_ref.actor.entropy_coeff=0",
+        f"actor_rollout_ref.actor.clip_ratio={clip_low}",
+        f"actor_rollout_ref.actor.fsdp_config.param_offload=False",
+        f"actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+        f"actor_rollout_ref.rollout.name=vllm",
+        f"actor_rollout_ref.rollout.gpu_memory_utilization=0.80",
+        f"actor_rollout_ref.rollout.tensor_model_parallel_size=1",
+        f"actor_rollout_ref.rollout.n={group_size}",
+        f"actor_rollout_ref.rollout.temperature=1.2",
+        f"actor_rollout_ref.rollout.top_p=0.95",
+        f"actor_rollout_ref.rollout.load_format=safetensors",
+        f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4",
+        f"actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4",
+        f"actor_rollout_ref.ref.fsdp_config.param_offload=True",
+        f"algorithm.use_kl_in_reward=False",
+        f"algorithm.kl_ctrl.kl_coef=0.0",
+        f"custom_reward_function.path={reward_fn_path}",
+        f"custom_reward_function.name=compute_score",
+        f"trainer.val_before_train=False",
+        f"trainer.critic_warmup=0",
+        "trainer.logger=[console]",
+        f"trainer.project_name=rlcr",
+        f"trainer.experiment_name=rlcr_{team_name}",
+        f"trainer.n_gpus_per_node={n_gpus}",
+        f"trainer.nnodes=1",
+        f"trainer.save_freq=50",
+        f"trainer.test_freq=10",
+        f"trainer.total_epochs={num_epochs}",
+        f"trainer.default_local_dir={os.path.abspath(output_dir)}",
+    ]
 
-    return cmd
+    return args
 
 
 def train_team_verl(
@@ -171,7 +171,7 @@ def train_team_verl(
         tokenizer, os.path.join(data_dir, "val.parquet"),
     )
 
-    cmd = build_verl_run_script(
+    cmd = build_verl_command(
         team_name=team_name,
         train_parquet=train_parquet,
         val_parquet=val_parquet,
@@ -180,13 +180,23 @@ def train_team_verl(
     )
 
     logger.info(f"[veRL] Training team: {team_name}")
-    logger.info(f"[veRL] Command:\n{cmd}")
+    logger.info(f"[veRL] Command: {' '.join(cmd)}")
 
-    exit_code = os.system(f"export SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=True && {cmd}")
+    env = os.environ.copy()
+    env["RLCR_REWARD_OVERLONG_PENALTY"] = str(config_dict.get("overlong_penalty", 1.0))
+    env["RLCR_REWARD_OVERLONG_BUFFER_LEN"] = str(config_dict.get("overlong_buffer_len", 32))
+    env["RLCR_REWARD_MAX_COMPLETION_LENGTH"] = str(config_dict.get("max_completion_length", 128))
 
-    if exit_code != 0:
-        logger.error(f"[veRL] Team {team_name} training failed with exit code {exit_code}")
-        return {"error": f"exit_code={exit_code}", "team": team_name}
+    try:
+        result = subprocess.run(
+            cmd,
+            env=env,
+            check=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        logger.error(f"[veRL] Team {team_name} training failed (exit {e.returncode})")
+        return {"error": f"exit_code={e.returncode}", "team": team_name}
 
     logger.success(f"[veRL] Team {team_name} training complete")
     return {

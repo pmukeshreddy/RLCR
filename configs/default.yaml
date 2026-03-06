@@ -142,7 +142,7 @@ model:
     gpu_ids: "0,1"
 
 training:
-  backend: "custom"  # "custom" (original SGLang loop) or "verl" (FSDP + vLLM)
+  backend: "verl"  # "verl" (FSDP + vLLM) or "custom" (original SGLang loop)
   method: "dapo"
   lora:
     r: 32
