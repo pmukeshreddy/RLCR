@@ -313,20 +313,23 @@ class ReviewScorer:
         messages = format_scoring_prompt(
             diff, comment, team_name, team_description, vote_history
         )
+        prompt_text = format_prompt_text(
+            diff, comment, team_name, team_description, vote_history
+        )
         payload = {
             "model": self.model_name,
-            "messages": messages,
+            "prompt": prompt_text,
             "max_tokens": self.max_new_tokens,
             "temperature": self.temperature,
             "top_p": 0.9,
         }
         resp = requests.post(
-            f"{self.sglang_url}/v1/chat/completions",
+            f"{self.sglang_url}/v1/completions",
             json=payload,
             timeout=60,
         )
         resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+        content = resp.json()["choices"][0]["text"]
         return parse_model_output(content)
 
     def batch_score(
@@ -349,12 +352,12 @@ class ReviewScorer:
 
         payloads = []
         for s in samples:
-            messages = format_scoring_prompt(
+            prompt_text = format_prompt_text(
                 s["diff"], s["comment"], team_name, team_description, vote_history
             )
             payloads.append({
                 "model": self.model_name,
-                "messages": messages,
+                "prompt": prompt_text,
                 "max_tokens": self.max_new_tokens,
                 "temperature": self.temperature,
                 "top_p": 0.9,
@@ -366,12 +369,12 @@ class ReviewScorer:
             idx, payload = idx_payload
             try:
                 resp = requests.post(
-                    f"{self.sglang_url}/v1/chat/completions",
+                    f"{self.sglang_url}/v1/completions",
                     json=payload,
                     timeout=120,
                 )
                 resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
+                content = resp.json()["choices"][0]["text"]
                 return idx, parse_model_output(content)
             except Exception as e:
                 logger.warning(f"Batch score request {idx} failed: {e}")
