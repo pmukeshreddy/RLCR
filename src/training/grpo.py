@@ -66,7 +66,7 @@ class GRPORunConfig:
     group_size: int = 16
     learning_rate: float = 5e-6
     num_epochs: int = 3
-    per_device_batch_size: int = 8
+    per_device_batch_size: int = 4
     gradient_accumulation_steps: int = 1  # only used by TRL path
     ppo_epochs: int = 2
     warmup_ratio: float = 0.1
@@ -702,7 +702,7 @@ class RLCRTrainer:
 
                 # Micro-batch forward passes to avoid materialising
                 # a single (n_seqs, max_len, vocab) logits tensor (~6 GiB).
-                _FWD_MB = 4
+                _FWD_MB = 16
 
                 # Phase 3: Compute old log-probs (reference, no gradient)
                 old_token_lps = []
@@ -910,7 +910,7 @@ def train_all_teams(
             group_size=config_dict.get("group_size", 16),
             learning_rate=config_dict.get("learning_rate", 5e-6),
             num_epochs=config_dict.get("num_epochs", 3),
-            per_device_batch_size=config_dict.get("per_device_batch_size", 8),
+            per_device_batch_size=config_dict.get("per_device_batch_size", 4),
             ppo_epochs=config_dict.get("ppo_epochs", 2),
             clip_ratio_low=config_dict.get("clip_ratio_low", 0.2),
             clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
@@ -974,7 +974,7 @@ def train_team_worker(
         group_size=config_dict.get("group_size", 16),
         learning_rate=config_dict.get("learning_rate", 5e-6),
         num_epochs=config_dict.get("num_epochs", 3),
-        per_device_batch_size=config_dict.get("per_device_batch_size", 8),
+        per_device_batch_size=config_dict.get("per_device_batch_size", 4),
         ppo_epochs=config_dict.get("ppo_epochs", 2),
         clip_ratio_low=config_dict.get("clip_ratio_low", 0.2),
         clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
