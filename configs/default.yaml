@@ -149,9 +149,10 @@ training:
     dropout: 0.05
     target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   dapo:
-    group_size: 16
+    group_size: 8
     learning_rate: 2.0e-5
-    num_epochs: 2
+    num_epochs: 5
+    sglang_concurrent: 64
     per_device_batch_size: 8
     ppo_epochs: 2
     warmup_ratio: 0.1

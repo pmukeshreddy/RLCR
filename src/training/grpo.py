@@ -720,21 +720,12 @@ class RLCRTrainer:
                 # Micro-batch size — safe with selective (no full vocab tensor)
                 _FWD_MB = 8
 
-                # Phase 3: Compute old log-probs into contiguous tensor
+                # Phase 3+4 fused: old_lps captured from the first PPO step's
+                # gradient forward (model is unchanged at that point, so old==new).
+                # Eliminates a redundant no_grad forward pass every batch.
                 old_lps_full = torch.zeros(
                     n_seqs, max_len, dtype=torch.float32, device=device
                 )
-                with torch.no_grad():
-                    for mb_s in range(0, n_seqs, _FWD_MB):
-                        mb_e = min(mb_s + _FWD_MB, n_seqs)
-                        mb_logits = self.model(
-                            input_ids=batch_ids[mb_s:mb_e],
-                            attention_mask=batch_mask[mb_s:mb_e],
-                        ).logits
-                        old_lps_full[mb_s:mb_e] = selective_log_softmax(
-                            mb_logits, gen_ids_padded[mb_s:mb_e]
-                        ).float()
-                        del mb_logits
                 torch.cuda.empty_cache()
 
                 # Phase 4: PPO inner loop — fully batched tensor ops
@@ -756,6 +747,10 @@ class RLCRTrainer:
                         new_lps = selective_log_softmax(
                             logits, gen_ids_padded[mb_s:mb_e]
                         ).float()
+
+                        # Capture old_lps on first PPO step before any weight update
+                        if ppo_step == 0:
+                            old_lps_full[mb_s:mb_e] = new_lps.detach()
 
                         mb_mask = gen_mask[mb_s:mb_e]
                         mb_old  = old_lps_full[mb_s:mb_e]

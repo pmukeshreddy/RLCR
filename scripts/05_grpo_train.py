@@ -116,6 +116,7 @@ def _build_config_dict(model_name: str, sglang_url: str | None, cfg) -> dict:
         "overlong_penalty": dapo.overlong_penalty,
         "overlong_buffer_len": dapo.overlong_buffer_len,
         "max_completion_length": getattr(dapo, "max_completion_length", 128),
+        "sglang_concurrent": getattr(dapo, "sglang_concurrent", 64),
         "seed": cfg.project.seed,
         "sglang_url": sglang_url,
     }
