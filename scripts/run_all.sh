@@ -250,11 +250,17 @@ if [ "$SKIP_TRAINING" = true ]; then
 elif [ "$USE_VERL" = true ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo " Step 4+5: veRL Training (FSDP + SGLang, all GPUs)"
+    VERL_ENGINE=$(python3 -c "
+import re
+with open('src/training/verl_trainer.py') as f:
+    m = re.search(r'rollout\.name=(\w+)', f.read())
+    print(m.group(1) if m else 'unknown')
+" 2>/dev/null || echo "unknown")
+    echo " Step 4+5: veRL Training (FSDP + ${VERL_ENGINE}, all GPUs)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$(date +%H:%M:%S)] Starting..."
-    echo "[*] veRL manages its own SGLang rollout engine internally"
-    run_step 5 "DAPO Training (veRL FSDP + SGLang)" \
+    echo "[*] veRL manages its own ${VERL_ENGINE} rollout engine internally"
+    run_step 5 "DAPO Training (veRL FSDP + ${VERL_ENGINE})" \
         "python scripts/05_grpo_train.py --verl $TRAIN_ARGS"
 else
     if [ "$NO_SGLANG" = false ]; then
