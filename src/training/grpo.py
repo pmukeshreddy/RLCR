@@ -66,7 +66,7 @@ class GRPORunConfig:
     group_size: int = 16
     learning_rate: float = 5e-6
     num_epochs: int = 3
-    per_device_batch_size: int = 4
+    per_device_batch_size: int = 8
     gradient_accumulation_steps: int = 1  # only used by TRL path
     ppo_epochs: int = 2
     warmup_ratio: float = 0.1
@@ -595,63 +595,69 @@ class RLCRTrainer:
                     sample = all_completions[0][0][0]["content"][:300]
                     logger.info(f"  [Epoch {epoch}] Sample completion: {sample!r}")
 
-                # Phase 2: Rewards + dynamic sampling with resample
+                # Phase 2: Rewards + batched dynamic sampling resample
                 # DAPO: filtered groups get REPLACED with new samples, not dropped.
+                # All filtered groups are resampled in a single batched rollout
+                # call to avoid sequential SGLang overhead.
                 batch_rewards = []
-                for i, (group_comps, lbl) in enumerate(
-                    zip(all_completions, labels)
-                ):
+                for group_comps, lbl in zip(all_completions, labels):
                     group_rewards = reward_fn(
                         group_comps, label=[lbl] * len(group_comps)
                     )
+                    batch_rewards.append(group_rewards)
                     total_groups_seen += 1
 
-                    max_resample = 3
-                    attempt = 0
-                    while (
-                        self.config.dynamic_sampling
-                        and torch.tensor(group_rewards).std().item() < 0.1
-                        and attempt < max_resample
-                    ):
-                        total_groups_skipped += 1
-                        attempt += 1
-                        # Pick a random replacement prompt
+                max_resample_rounds = 3
+                for _round in range(max_resample_rounds):
+                    if not self.config.dynamic_sampling:
+                        break
+                    needs_resample = []
+                    for i, gr in enumerate(batch_rewards):
+                        if torch.tensor(gr).std().item() < 0.1:
+                            needs_resample.append(i)
+                    if not needs_resample:
+                        break
+                    total_groups_skipped += len(needs_resample)
+
+                    resample_prompts = []
+                    resample_labels = []
+                    for _ in needs_resample:
                         rand_idx = int(torch.randint(len(train_dataset), (1,)).item())
-                        new_sample = train_dataset[rand_idx]
-                        new_prompt = [new_sample["prompt"]]
-                        new_lbl = new_sample["label"]
-                        if use_sglang:
-                            new_comps, new_pids, new_gids = rollout_sglang(
-                                prompts=new_prompt,
-                                group_size=self.config.group_size,
-                                sglang_url=self.config.sglang_url,
-                                model_name=sglang_model,
-                                tokenizer=self.tokenizer,
-                                max_tokens=self.config.max_completion_length,
-                                max_workers=self.config.sglang_concurrent,
-                                max_prompt_length=self.config.max_prompt_length,
-                            )
-                        else:
-                            new_comps, new_pids, new_gids = rollout_local(
-                                prompts=new_prompt,
-                                group_size=self.config.group_size,
-                                model=self.model,
-                                tokenizer=self.tokenizer,
-                                device=device,
-                                max_tokens=self.config.max_completion_length,
-                                max_prompt_length=self.config.max_prompt_length,
-                            )
-                        group_comps = new_comps[0]
-                        all_prompt_ids[i] = new_pids[0]
-                        all_gen_ids[i] = new_gids[0]
-                        labels[i] = new_lbl
-                        lbl = new_lbl
-                        group_rewards = reward_fn(
-                            group_comps, label=[lbl] * len(group_comps)
+                        s = train_dataset[rand_idx]
+                        resample_prompts.append(s["prompt"])
+                        resample_labels.append(s["label"])
+
+                    if use_sglang:
+                        r_comps, r_pids, r_gids = rollout_sglang(
+                            prompts=resample_prompts,
+                            group_size=self.config.group_size,
+                            sglang_url=self.config.sglang_url,
+                            model_name=sglang_model,
+                            tokenizer=self.tokenizer,
+                            max_tokens=self.config.max_completion_length,
+                            max_workers=self.config.sglang_concurrent,
+                            max_prompt_length=self.config.max_prompt_length,
+                        )
+                    else:
+                        r_comps, r_pids, r_gids = rollout_local(
+                            prompts=resample_prompts,
+                            group_size=self.config.group_size,
+                            model=self.model,
+                            tokenizer=self.tokenizer,
+                            device=device,
+                            max_tokens=self.config.max_completion_length,
+                            max_prompt_length=self.config.max_prompt_length,
+                        )
+
+                    for j, idx in enumerate(needs_resample):
+                        all_prompt_ids[idx] = r_pids[j]
+                        all_gen_ids[idx] = r_gids[j]
+                        labels[idx] = resample_labels[j]
+                        batch_rewards[idx] = reward_fn(
+                            r_comps[j],
+                            label=[resample_labels[j]] * len(r_comps[j]),
                         )
                         total_groups_seen += 1
-
-                    batch_rewards.append(group_rewards)
 
                 # Collect sequences + advantages (all groups used after resample)
                 sequences = []
@@ -702,7 +708,7 @@ class RLCRTrainer:
 
                 # Micro-batch forward passes to avoid materialising
                 # a single (n_seqs, max_len, vocab) logits tensor (~6 GiB).
-                _FWD_MB = 16
+                _FWD_MB = 32
 
                 # Phase 3: Compute old log-probs (reference, no gradient)
                 old_token_lps = []
@@ -910,7 +916,7 @@ def train_all_teams(
             group_size=config_dict.get("group_size", 16),
             learning_rate=config_dict.get("learning_rate", 5e-6),
             num_epochs=config_dict.get("num_epochs", 3),
-            per_device_batch_size=config_dict.get("per_device_batch_size", 4),
+            per_device_batch_size=config_dict.get("per_device_batch_size", 8),
             ppo_epochs=config_dict.get("ppo_epochs", 2),
             clip_ratio_low=config_dict.get("clip_ratio_low", 0.2),
             clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
@@ -974,7 +980,7 @@ def train_team_worker(
         group_size=config_dict.get("group_size", 16),
         learning_rate=config_dict.get("learning_rate", 5e-6),
         num_epochs=config_dict.get("num_epochs", 3),
-        per_device_batch_size=config_dict.get("per_device_batch_size", 4),
+        per_device_batch_size=config_dict.get("per_device_batch_size", 8),
         ppo_epochs=config_dict.get("ppo_epochs", 2),
         clip_ratio_low=config_dict.get("clip_ratio_low", 0.2),
         clip_ratio_high=config_dict.get("clip_ratio_high", 0.28),
