@@ -708,7 +708,7 @@ class RLCRTrainer:
 
                 # Micro-batch forward passes to avoid materialising
                 # a single (n_seqs, max_len, vocab) logits tensor (~6 GiB).
-                _FWD_MB = 32
+                _FWD_MB = 8
 
                 # Phase 3: Compute old log-probs (reference, no gradient)
                 old_token_lps = []
