@@ -687,26 +687,36 @@ class RLCRTrainer:
                     batch_ids[k, :seq_len] = s["full_ids"].to(device)
                     batch_mask[k, :seq_len] = 1
 
-                # selective_log_softmax: computes logsumexp then gathers
-                # the single target logit. Never materialises the full
-                # (batch, seq, 152K) log-prob tensor — 1 kernel vs 16.
+                # selective_log_softmax: gathers only the target token logit.
+                # For fp32/fp64: logsumexp + gather — never materialises full vocab.
+                # For bf16: log_softmax upcasts internally (logsumexp doesn't),
+                # so we do per-row log_softmax + immediate gather — same memory
+                # savings, correct numerics. Matches TRL/veRL implementation.
                 def selective_log_softmax(logits, index):
                     """logits: (B, T, V), index: (B, T) → (B, T) token log-probs."""
-                    logsumexp = torch.logsumexp(logits, dim=-1)           # (B, T)
-                    selected  = logits.gather(-1, index.unsqueeze(-1)).squeeze(-1)  # (B, T)
-                    return selected - logsumexp
+                    if logits.dtype in (torch.float32, torch.float64):
+                        logsumexp = torch.logsumexp(logits, dim=-1)
+                        selected = logits.gather(-1, index.unsqueeze(-1)).squeeze(-1)
+                        return selected - logsumexp
+                    # bf16: per-row log_softmax for correct internal upcast
+                    token_logprobs = torch.zeros(
+                        logits.shape[0], logits.shape[1],
+                        dtype=logits.dtype, device=logits.device,
+                    )
+                    for i in range(logits.shape[0]):
+                        lp = logits[i].log_softmax(dim=-1)
+                        token_logprobs[i] = lp.gather(
+                            -1, index[i].unsqueeze(-1)
+                        ).squeeze(-1)
+                    return token_logprobs
 
                 # Build per-sequence gen-token index tensor (padded with 0)
                 gen_ids_padded = torch.zeros(
                     n_seqs, max_len, dtype=torch.long, device=device
                 )
-                gen_mask = torch.zeros(
-                    n_seqs, max_len, dtype=torch.bool, device=device
-                )
                 for k, s in enumerate(sequences):
                     pl, gl = s["prompt_len"], s["gen_len"]
                     gen_ids_padded[k, pl - 1 : pl - 1 + gl] = batch_ids[k, pl : pl + gl]
-                    gen_mask[k, pl - 1 : pl - 1 + gl] = True
 
                 # Micro-batch size — safe with selective (no full vocab tensor)
                 _FWD_MB = 16
@@ -786,7 +796,7 @@ class RLCRTrainer:
                         step_loss = total_loss_val / total_tokens_all
                         optim_step += 1
 
-                del batch_ids, batch_mask, old_token_lps, gen_ids_padded, gen_mask
+                del batch_ids, batch_mask, old_token_lps, gen_ids_padded
                 torch.cuda.empty_cache()
 
                 log_every = min(self.config.logging_steps, max(total_batches // 3, 1))
