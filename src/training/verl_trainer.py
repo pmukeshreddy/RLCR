@@ -121,7 +121,7 @@ def build_verl_command(
         f"actor_rollout_ref.actor.clip_ratio_high={clip_high}",
         f"actor_rollout_ref.actor.fsdp_config.param_offload=False",
         f"actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
-        f"actor_rollout_ref.rollout.name=vllm",
+        f"actor_rollout_ref.rollout.name=sglang",
         f"actor_rollout_ref.rollout.gpu_memory_utilization=0.80",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size=1",
         f"actor_rollout_ref.rollout.n={group_size}",
