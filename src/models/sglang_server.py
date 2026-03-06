@@ -103,8 +103,11 @@ class SGLangServer:
             cmd += [
                 "--enable-lora",
                 "--max-lora-rank", str(self.max_lora_rank),
-                "--lora-target-modules", "all",
+                "--lora-target-modules",
+                "q_proj", "v_proj", "k_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
                 "--max-loras-per-batch", "2",
+                "--disable-cuda-graph",
             ]
 
         logger.info(f"Starting SGLang: {self.model_name} on {self.url}")

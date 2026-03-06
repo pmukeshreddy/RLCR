@@ -110,7 +110,7 @@ launch_sglang() {
     echo "[*] Launching SGLang: $model on port $port (mem_fraction=$mem_frac, lora=$enable_lora)"
     local lora_flags=""
     if [ "$enable_lora" = true ]; then
-        lora_flags="--enable-lora --max-lora-rank 32 --lora-target-modules all --max-loras-per-batch 2"
+        lora_flags="--enable-lora --max-lora-rank 32 --lora-target-modules q_proj v_proj k_proj o_proj gate_proj up_proj down_proj --max-loras-per-batch 2 --disable-cuda-graph"
     fi
     python -m sglang.launch_server \
         --model-path "$model" \
