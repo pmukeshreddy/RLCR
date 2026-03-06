@@ -1,7 +1,7 @@
 """veRL-based DAPO training for RLCR.
 
 Uses veRL's RayPPOTrainer with FSDP across all GPUs.
-Rollout uses veRL's built-in vLLM engine (same memory, resharded between phases).
+Rollout uses veRL's built-in engine (controlled by ROLLOUT_ENGINE constant).
 
 Each team gets a fresh RayPPOTrainer with its own LoRA adapter.
 Base model loads per-team (14B loads in ~6s on H100 NVMe — acceptable).
@@ -19,6 +19,8 @@ from loguru import logger
 from transformers import AutoTokenizer
 
 from src.models.scoring import format_prompt_text
+
+ROLLOUT_ENGINE = "sglang"
 
 
 def _make_parquet(
@@ -124,7 +126,7 @@ def build_verl_command(
         f"actor_rollout_ref.actor.clip_ratio_high={clip_high}",
         f"actor_rollout_ref.actor.fsdp_config.param_offload=False",
         f"actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
-        f"actor_rollout_ref.rollout.name=sglang",
+        f"actor_rollout_ref.rollout.name={ROLLOUT_ENGINE}",
         f"actor_rollout_ref.rollout.gpu_memory_utilization=0.80",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size=1",
         f"actor_rollout_ref.rollout.n={group_size}",
@@ -219,7 +221,7 @@ def train_all_teams_verl(
     """Train all teams sequentially using veRL.
 
     Each team gets a fresh veRL trainer invocation. The base model loads
-    per-team (~6s on H100 NVMe for 14B). veRL manages FSDP + vLLM internally.
+    per-team (~6s on H100 NVMe for 14B). veRL manages FSDP + rollout internally.
     """
     model_name = config_dict["model_name"]
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)

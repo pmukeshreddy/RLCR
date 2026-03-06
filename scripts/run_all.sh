@@ -250,12 +250,7 @@ if [ "$SKIP_TRAINING" = true ]; then
 elif [ "$USE_VERL" = true ]; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    VERL_ENGINE=$(python3 -c "
-import re
-with open('src/training/verl_trainer.py') as f:
-    m = re.search(r'rollout\.name=(\w+)', f.read())
-    print(m.group(1) if m else 'unknown')
-" 2>/dev/null || echo "unknown")
+    VERL_ENGINE=$(python3 -c "from src.training.verl_trainer import ROLLOUT_ENGINE; print(ROLLOUT_ENGINE)" 2>/dev/null || echo "unknown")
     echo " Step 4+5: veRL Training (FSDP + ${VERL_ENGINE}, all GPUs)"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "[$(date +%H:%M:%S)] Starting..."
