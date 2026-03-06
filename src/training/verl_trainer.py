@@ -90,6 +90,7 @@ def build_verl_command(
     max_completion = config_dict.get("max_completion_length", 128)
     n_gpus = config_dict.get("n_gpus", 2)
     clip_low = config_dict.get("clip_ratio_low", 0.2)
+    clip_high = config_dict.get("clip_ratio_high", 0.28)
 
     reward_fn_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "verl_reward.py")
@@ -116,7 +117,8 @@ def build_verl_command(
         f"actor_rollout_ref.actor.ppo_epochs={ppo_epochs}",
         f"actor_rollout_ref.actor.use_kl_loss=False",
         f"actor_rollout_ref.actor.entropy_coeff=0",
-        f"actor_rollout_ref.actor.clip_ratio={clip_low}",
+        f"actor_rollout_ref.actor.clip_ratio_low={clip_low}",
+        f"actor_rollout_ref.actor.clip_ratio_high={clip_high}",
         f"actor_rollout_ref.actor.fsdp_config.param_offload=False",
         f"actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
         f"actor_rollout_ref.rollout.name=vllm",
