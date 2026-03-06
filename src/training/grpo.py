@@ -63,7 +63,7 @@ class GRPORunConfig:
     lora_alpha: int = 64
     lora_dropout: float = 0.05
     lora_target_modules: list[str] | None = None
-    group_size: int = 8
+    group_size: int = 16
     learning_rate: float = 5e-6
     num_epochs: int = 3
     per_device_batch_size: int = 2
@@ -559,10 +559,15 @@ class RLCRTrainer:
                 labels = [b["label"] for b in batch]
 
                 # Phase 1: Sync LoRA → SGLang, then generate (on-policy)
-                if use_sglang:
+                # Skip first-batch sync — setup already loaded the adapter.
+                # Re-syncing would create a new version while unloading the
+                # working one, causing empty completions on the first batch.
+                if use_sglang and global_step > 0:
                     current_adapter = _sync_lora_to_sglang(
                         self.model, self.config.sglang_url, adapter_sync_dir,
                     )
+
+                if use_sglang:
                     sglang_model = f"{self.config.model_name}:{current_adapter}"
                     all_completions, all_prompt_ids, all_gen_ids = rollout_sglang(
                         prompts=prompts,
@@ -590,32 +595,73 @@ class RLCRTrainer:
                     sample = all_completions[0][0][0]["content"][:300]
                     logger.info(f"  [Epoch {epoch}] Sample completion: {sample!r}")
 
-                # Phase 2: Rewards + dynamic sampling filter
+                # Phase 2: Rewards + dynamic sampling with resample
+                # DAPO: filtered groups get REPLACED with new samples, not dropped.
                 batch_rewards = []
-                active_mask = []
-                for group_comps, lbl in zip(all_completions, labels):
+                for i, (group_comps, lbl) in enumerate(
+                    zip(all_completions, labels)
+                ):
                     group_rewards = reward_fn(
                         group_comps, label=[lbl] * len(group_comps)
                     )
-                    batch_rewards.append(group_rewards)
                     total_groups_seen += 1
 
-                    reward_std = torch.tensor(group_rewards).std().item()
-                    if self.config.dynamic_sampling and reward_std < 0.1:
-                        active_mask.append(False)
+                    max_resample = 3
+                    attempt = 0
+                    while (
+                        self.config.dynamic_sampling
+                        and torch.tensor(group_rewards).std().item() < 0.1
+                        and attempt < max_resample
+                    ):
                         total_groups_skipped += 1
-                    else:
-                        active_mask.append(True)
+                        attempt += 1
+                        # Pick a random replacement prompt
+                        rand_idx = int(torch.randint(len(train_dataset), (1,)).item())
+                        new_sample = train_dataset[rand_idx]
+                        new_prompt = [new_sample["prompt"]]
+                        new_lbl = new_sample["label"]
+                        if use_sglang:
+                            new_comps, new_pids, new_gids = rollout_sglang(
+                                prompts=new_prompt,
+                                group_size=self.config.group_size,
+                                sglang_url=self.config.sglang_url,
+                                model_name=sglang_model,
+                                tokenizer=self.tokenizer,
+                                max_tokens=self.config.max_completion_length,
+                                max_workers=self.config.sglang_concurrent,
+                                max_prompt_length=self.config.max_prompt_length,
+                            )
+                        else:
+                            new_comps, new_pids, new_gids = rollout_local(
+                                prompts=new_prompt,
+                                group_size=self.config.group_size,
+                                model=self.model,
+                                tokenizer=self.tokenizer,
+                                device=device,
+                                max_tokens=self.config.max_completion_length,
+                                max_prompt_length=self.config.max_prompt_length,
+                            )
+                        group_comps = new_comps[0]
+                        all_prompt_ids[i] = new_pids[0]
+                        all_gen_ids[i] = new_gids[0]
+                        labels[i] = new_lbl
+                        lbl = new_lbl
+                        group_rewards = reward_fn(
+                            group_comps, label=[lbl] * len(group_comps)
+                        )
+                        total_groups_seen += 1
 
-                # Collect active sequences + advantages
+                    batch_rewards.append(group_rewards)
+
+                # Collect sequences + advantages (all groups used after resample)
                 sequences = []
                 for i, (prompt_ids_cpu, group_gen_ids, group_rewards) in enumerate(
                     zip(all_prompt_ids, all_gen_ids, batch_rewards)
                 ):
-                    if not active_mask[i]:
+                    rewards_t = torch.tensor(group_rewards, dtype=torch.float32)
+                    if rewards_t.std().item() < 1e-8:
                         continue
 
-                    rewards_t = torch.tensor(group_rewards, dtype=torch.float32)
                     mean_r = rewards_t.mean()
                     std_r = rewards_t.std() + 1e-8
                     advantages = (rewards_t - mean_r) / std_r
@@ -752,7 +798,7 @@ class RLCRTrainer:
                         f"Loss: {step_loss:.4f} | "
                         f"Reward: {avg_reward:.3f} | "
                         f"Clip%: {cf:.1%} | "
-                        f"Skip%: {frac_skipped:.1%} | "
+                        f"Resample%: {frac_skipped:.1%} | "
                         f"LR: {scheduler.get_last_lr()[0]:.2e}"
                     )
                     if avg_reward > best_reward:
@@ -774,7 +820,7 @@ class RLCRTrainer:
         frac_skipped = total_groups_skipped / max(total_groups_seen, 1)
         logger.success(
             f"DAPO training complete. Best reward: {best_reward:.3f} | "
-            f"Dynamic sampling skipped: {frac_skipped:.1%} of groups"
+            f"Dynamic sampling resampled: {frac_skipped:.1%} of groups"
         )
 
         return {
@@ -861,7 +907,7 @@ def train_all_teams(
             team_name=team_name,
             team_description=team.description,
             vote_history=team.vote_history,
-            group_size=config_dict.get("group_size", 4),
+            group_size=config_dict.get("group_size", 16),
             learning_rate=config_dict.get("learning_rate", 5e-6),
             num_epochs=config_dict.get("num_epochs", 3),
             per_device_batch_size=config_dict.get("per_device_batch_size", 4),
@@ -925,7 +971,7 @@ def train_team_worker(
         lora_r=config_dict.get("lora_r", 16),
         lora_alpha=config_dict.get("lora_alpha", 32),
         lora_dropout=config_dict.get("lora_dropout", 0.05),
-        group_size=config_dict.get("group_size", 4),
+        group_size=config_dict.get("group_size", 16),
         learning_rate=config_dict.get("learning_rate", 5e-6),
         num_epochs=config_dict.get("num_epochs", 3),
         per_device_batch_size=config_dict.get("per_device_batch_size", 4),
