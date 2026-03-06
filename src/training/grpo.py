@@ -735,6 +735,7 @@ class RLCRTrainer:
                             mb_logits, gen_ids_padded[mb_s:mb_e]
                         ).float()
                         del mb_logits
+                torch.cuda.empty_cache()
 
                 # Phase 4: PPO inner loop — fully batched tensor ops
                 total_tokens_all = gen_mask.sum().item()

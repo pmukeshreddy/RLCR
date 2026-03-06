@@ -234,9 +234,9 @@ if [ "$NO_SGLANG" = false ]; then
     echo "[$(date +%H:%M:%S)] ✓ Step 4 complete"
 fi
 
-TRAIN_ENV=""
+TRAIN_ENV="PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 if [ -n "$TRAIN_GPUS" ]; then
-    TRAIN_ENV="CUDA_VISIBLE_DEVICES=$TRAIN_GPUS"
+    TRAIN_ENV="$TRAIN_ENV CUDA_VISIBLE_DEVICES=$TRAIN_GPUS"
 fi
 run_step 5 "DAPO Training (load once, swap LoRA per team)" \
     "$TRAIN_ENV python scripts/05_grpo_train.py $TRAIN_ARGS"
