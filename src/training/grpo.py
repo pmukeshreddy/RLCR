@@ -136,45 +136,54 @@ def _probe_sglang(url: str) -> bool:
     return False
 
 
-_SGLANG_ADAPTER_NAME = "current_policy"
+_sync_version = 0
 
 
-def _sync_lora_to_sglang(model, sglang_url: str, adapter_dir: str) -> bool:
+def _sync_lora_to_sglang(model, sglang_url: str, adapter_dir: str) -> str | None:
     """Save LoRA adapter to disk and hot-reload into SGLang.
 
-    Implements veRL-style weight sync: push current policy weights to the
-    inference engine before every rollout so generation is on-policy.
-    Flow: unload old adapter → save new weights → load new adapter.
+    Uses versioned adapter names (policy_v0, policy_v1, ...) so SGLang
+    always reads fresh weights from disk. Loads the new version first,
+    then unloads the old — no gap where no adapter is loaded.
+
+    Returns the adapter name to use in generation requests, or None on failure.
     """
     import requests
+    global _sync_version
 
     adapter_path = Path(adapter_dir)
     adapter_path.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(adapter_path))
 
-    try:
-        requests.post(
-            f"{sglang_url}/unload_lora_adapter",
-            json={"lora_name": _SGLANG_ADAPTER_NAME},
-            timeout=10,
-        )
-    except Exception:
-        pass
+    new_name = f"policy_v{_sync_version}"
+    old_name = f"policy_v{_sync_version - 1}" if _sync_version > 0 else None
 
     try:
         resp = requests.post(
             f"{sglang_url}/load_lora_adapter",
             json={
-                "lora_name": _SGLANG_ADAPTER_NAME,
+                "lora_name": new_name,
                 "lora_path": str(adapter_path.resolve()),
             },
             timeout=30,
         )
         resp.raise_for_status()
-        return True
     except Exception as e:
-        logger.warning(f"LoRA sync to SGLang failed: {e}")
-        return False
+        logger.warning(f"LoRA sync to SGLang failed (v{_sync_version}): {e}")
+        return None
+
+    if old_name:
+        try:
+            requests.post(
+                f"{sglang_url}/unload_lora_adapter",
+                json={"lora_name": old_name},
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    _sync_version += 1
+    return new_name
 
 
 def _sglang_generate_one(args: tuple) -> str:
@@ -501,9 +510,12 @@ class RLCRTrainer:
 
         use_sglang = bool(self.config.sglang_url and _probe_sglang(self.config.sglang_url))
         adapter_sync_dir = str(Path(self.config.output_dir) / "_sglang_sync")
+        current_adapter = None
         if use_sglang:
-            synced = _sync_lora_to_sglang(self.model, self.config.sglang_url, adapter_sync_dir)
-            if synced:
+            current_adapter = _sync_lora_to_sglang(
+                self.model, self.config.sglang_url, adapter_sync_dir,
+            )
+            if current_adapter:
                 logger.info(
                     f"Rollout via SGLang at {self.config.sglang_url} "
                     f"(on-policy with LoRA sync every batch)"
@@ -548,10 +560,10 @@ class RLCRTrainer:
 
                 # Phase 1: Sync LoRA → SGLang, then generate (on-policy)
                 if use_sglang:
-                    _sync_lora_to_sglang(
+                    current_adapter = _sync_lora_to_sglang(
                         self.model, self.config.sglang_url, adapter_sync_dir,
                     )
-                    sglang_model = f"{self.config.model_name}:{_SGLANG_ADAPTER_NAME}"
+                    sglang_model = f"{self.config.model_name}:{current_adapter}"
                     all_completions, all_prompt_ids, all_gen_ids = rollout_sglang(
                         prompts=prompts,
                         group_size=self.config.group_size,
@@ -814,6 +826,9 @@ def train_all_teams(
 
     results = {}
     for idx, team_name in enumerate(team_names):
+        global _sync_version
+        _sync_version = 0
+
         team = teams[team_name]
         logger.info(f"[{idx+1}/{len(team_names)}] Training team: {team_name}")
 
