@@ -11,7 +11,11 @@ Three-component reward (RLBFF-style: continuous + binary verifiable + format):
        False negative (FILTER,  label=1): -0.3  ← mild: don't miss too much
   3. Format compliance (weight 0.2): +1 for all three tags, -1 for garbage.
 
-Unparseable output (no extractable score) → flat -1.0 penalty.
+Unparseable output gets graduated penalties (not flat -1.0) based on how
+close the response got to valid format, plus a length-shaping term that
+ensures reward variance within every GRPO group — achieving the effect of
+DAPO dynamic sampling without patching the advantage computation.
+
 Plus DAPO overlong reward shaping for completions exceeding expected length.
 
 Design rationale (Greptile use case):
@@ -134,7 +138,7 @@ class CodeReviewReward:
         score = _extract_score(text)
 
         if score is None:
-            return -1.0, 0.5
+            return self._unparseable_reward(text), 0.5
 
         # Component 1: shaped correctness (smooth gradients)
         correctness = (1.0 - abs(score - float(label))) * 2.0 - 1.0
@@ -175,6 +179,41 @@ class CodeReviewReward:
                 reward -= penalty
 
         return reward, score
+
+    def _unparseable_reward(self, text: str) -> float:
+        """Graduated penalty for responses without a parseable <score> tag.
+
+        Instead of a flat -1.0, assigns a reward based on how close the
+        response got to producing valid structured output. Combined with a
+        length-shaping term, this guarantees reward variance within every
+        GRPO group — eliminating zero-variance groups without needing to
+        patch the advantage computation (reward-level dynamic sampling).
+        """
+        text_lower = text.lower()
+        has_think_open = "<think>" in text_lower
+        has_think_close = "</think>" in text_lower
+
+        think_word_count = 0
+        if has_think_open:
+            start = text_lower.find("<think>") + len("<think>")
+            end = text_lower.find("</think>") if has_think_close else len(text)
+            think_word_count = len(text[start:end].strip().split())
+
+        if has_think_open and has_think_close:
+            base = -0.3
+        elif has_think_open and think_word_count > 10:
+            base = -0.5
+        elif has_think_open:
+            base = -0.7
+        else:
+            base = -1.0
+
+        len_ratio = min(
+            len(text.split()) / max(self.max_completion_length, 1), 1.0
+        )
+        length_penalty = 0.15 * len_ratio
+
+        return base - length_penalty
 
 
 def calibrate_threshold(
