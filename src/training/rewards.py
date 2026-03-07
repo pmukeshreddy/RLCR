@@ -183,16 +183,14 @@ class CodeReviewReward:
     def _unparseable_reward(self, text: str) -> float:
         """Graduated penalty for responses without a parseable <score> tag.
 
-        Instead of a flat -1.0, assigns a reward based on structural progress
-        plus a character-level length penalty that guarantees reward variance
-        within every GRPO group — achieving DAPO dynamic sampling at the
-        reward level (100% action rate, no zero-variance groups).
+        DAPO-style reward-level dynamic sampling: structural progress tiers
+        plus a length penalty normalized by the output token budget
+        (max_completion_length). Character count / token budget yields a ratio
+        > 1.0 for full-length responses, creating natural variance between
+        responses of similar token length without clamping.
 
-        Variance budget (for 8 truncated responses in the same structural tier):
-          - Character counts naturally differ by 200-400 chars across responses
-          - With coefficient 0.3 and ~4 chars/token, this yields ~0.02 reward
-            spread per group — enough for meaningful advantages with
-            norm_adv_by_std_in_grpo=False
+        For 8 truncated responses at 1024 tokens (chars ~3800-4100):
+          spread ≈ 0.1 * (4100 - 3800) / 1024 ≈ 0.03 → advantages ±0.015
         """
         text_lower = text.lower()
         has_think_open = "<think>" in text_lower
@@ -213,9 +211,7 @@ class CodeReviewReward:
         else:
             base = -1.0
 
-        max_chars = self.max_completion_length * 4
-        char_ratio = min(len(text) / max(max_chars, 1), 1.0)
-        length_penalty = 0.3 * char_ratio
+        length_penalty = 0.1 * len(text) / max(self.max_completion_length, 1)
 
         return base - length_penalty
 
