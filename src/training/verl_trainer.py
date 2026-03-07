@@ -101,7 +101,7 @@ def build_verl_command(
         os.path.join(os.path.dirname(__file__), "verl_reward.py")
     )
 
-    gen_batch_size = batch_size * 3
+    gen_batch_size = min(batch_size * 3, n_train_samples) if n_train_samples > 0 else batch_size
 
     args = [
         "python3", "-m", "verl.trainer.main_ppo",
