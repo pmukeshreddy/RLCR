@@ -127,7 +127,7 @@ def build_verl_command(
         f"actor_rollout_ref.actor.optim.warmup_style=constant",
         # --- Actor training ---
         f"actor_rollout_ref.actor.ppo_mini_batch_size={batch_size}",
-        f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4",
+        f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2",
         f"actor_rollout_ref.actor.ppo_epochs={ppo_epochs}",
         f"actor_rollout_ref.actor.use_kl_loss=False",
         f"actor_rollout_ref.actor.entropy_coeff=0",
@@ -146,9 +146,9 @@ def build_verl_command(
         f"actor_rollout_ref.rollout.top_p=0.95",
         f"actor_rollout_ref.rollout.load_format=safetensors",
         f"actor_rollout_ref.rollout.layered_summon=True",
-        f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4",
+        f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2",
         # --- Ref ---
-        f"actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4",
+        f"actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2",
         f"actor_rollout_ref.ref.fsdp_config.param_offload=True",
         # --- Algorithm (DAPO) ---
         f"algorithm.use_kl_in_reward=False",
