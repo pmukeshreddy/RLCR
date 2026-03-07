@@ -96,9 +96,12 @@ def build_verl_command(
     reward_fn_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "verl_reward.py")
     )
+    wrapper_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "verl_wrapper.py")
+    )
 
     args = [
-        "python3", "-m", "verl.trainer.main_ppo",
+        "python3", wrapper_path,
         f"algorithm.adv_estimator=grpo",
         f"data.train_files={os.path.abspath(train_parquet)}",
         f"data.val_files={os.path.abspath(val_parquet)}",
