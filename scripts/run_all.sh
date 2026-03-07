@@ -178,6 +178,11 @@ if [ -d "data/processed" ]; then
 fi
 
 # =============================================
+# Patch dependencies (veRL + SGLang compat)
+# =============================================
+bash scripts/patch_deps.sh
+
+# =============================================
 # Steps 1-3: CPU only (data + embeddings)
 # =============================================
 
