@@ -97,12 +97,15 @@ def build_verl_command(
         os.path.join(os.path.dirname(__file__), "verl_reward.py")
     )
 
+    gen_batch_size = max(batch_size, batch_size)
+
     args = [
         "python3", "-m", "verl.trainer.main_ppo",
         f"algorithm.adv_estimator=grpo",
         f"data.train_files={os.path.abspath(train_parquet)}",
         f"data.val_files={os.path.abspath(val_parquet)}",
         f"data.train_batch_size={batch_size}",
+        f"data.gen_batch_size={gen_batch_size}",
         f"data.max_prompt_length=1024",
         f"data.max_response_length={max_completion}",
         f"data.filter_overlong_prompts=True",
@@ -120,6 +123,7 @@ def build_verl_command(
         f"actor_rollout_ref.actor.entropy_coeff=0",
         f"actor_rollout_ref.actor.clip_ratio_low={clip_low}",
         f"actor_rollout_ref.actor.clip_ratio_high={clip_high}",
+        f"actor_rollout_ref.actor.loss_agg_mode=token-mean",
         f"actor_rollout_ref.actor.fsdp_config.param_offload=False",
         f"actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
         f"actor_rollout_ref.rollout.name={ROLLOUT_ENGINE}",
@@ -136,6 +140,9 @@ def build_verl_command(
         f"algorithm.use_kl_in_reward=False",
         f"algorithm.kl_ctrl.kl_coef=0.0",
         f"algorithm.norm_adv_by_std_in_grpo=False",
+        f"algorithm.filter_groups.enable=True",
+        f"algorithm.filter_groups.metric=score",
+        f"algorithm.filter_groups.max_num_gen_batches=5",
         f"custom_reward_function.path={reward_fn_path}",
         f"custom_reward_function.name=compute_score",
         f"trainer.val_before_train=False",
