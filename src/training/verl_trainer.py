@@ -8,13 +8,12 @@ Base model loads per-team (14B loads in ~6s on H100 NVMe — acceptable).
 """
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
 
-import pandas as pd
 import torch
+from datasets import Dataset as HFDataset
 from loguru import logger
 from transformers import AutoTokenizer
 
@@ -33,11 +32,10 @@ def _make_parquet(
 ) -> str:
     """Convert RLCR samples to a veRL-compatible parquet file.
 
-    veRL expects parquet with columns:
-      - prompt: list of chat messages (as JSON string or list-of-dicts)
+    veRL expects parquet with columns matching its standard format:
+      - prompt: list of chat messages (list-of-dicts)
       - data_source: dataset name
-      - ground_truth: label for reward function
-      - extra_info: optional dict (JSON string)
+      - reward_model: dict with at least {"ground_truth": ...}
     """
     records = []
     for s in samples:
@@ -57,14 +55,13 @@ def _make_parquet(
         messages = [{"role": "user", "content": prompt_text}]
 
         records.append({
-            "prompt": json.dumps(messages),
+            "prompt": messages,
             "data_source": f"rlcr_{team_name}",
-            "ground_truth": str(int(label)),
+            "reward_model": {"style": "rule", "ground_truth": str(int(label))},
         })
 
-    df = pd.DataFrame(records)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(output_path, index=False)
+    HFDataset.from_list(records).to_parquet(output_path)
     logger.info(f"Wrote {len(records)} samples to {output_path}")
     return output_path
 
