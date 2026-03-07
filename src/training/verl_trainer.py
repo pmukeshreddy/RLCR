@@ -92,16 +92,21 @@ def build_verl_command(
     n_gpus = config_dict.get("n_gpus", 2)
     clip_low = config_dict.get("clip_ratio_low", 0.2)
     clip_high = config_dict.get("clip_ratio_high", 0.28)
+    grad_clip = config_dict.get("max_grad_norm", 0.5)
+    warmup_ratio = config_dict.get("warmup_ratio", 0.1)
+    overlong_penalty = config_dict.get("overlong_penalty", 1.0)
+    overlong_buffer_len = config_dict.get("overlong_buffer_len", 32)
 
     reward_fn_path = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "verl_reward.py")
     )
 
-    gen_batch_size = max(batch_size, batch_size)
+    gen_batch_size = batch_size * 3
 
     args = [
         "python3", "-m", "verl.trainer.main_ppo",
         f"algorithm.adv_estimator=grpo",
+        # --- Data ---
         f"data.train_files={os.path.abspath(train_parquet)}",
         f"data.val_files={os.path.abspath(val_parquet)}",
         f"data.train_batch_size={batch_size}",
@@ -110,12 +115,17 @@ def build_verl_command(
         f"data.max_response_length={max_completion}",
         f"data.filter_overlong_prompts=True",
         f"data.truncation=error",
+        # --- Model ---
         f"actor_rollout_ref.model.path={model_name}",
         f"actor_rollout_ref.model.lora_rank={lora_r}",
         f"actor_rollout_ref.model.lora_alpha={lora_alpha}",
         f"actor_rollout_ref.model.use_remove_padding=True",
         f"actor_rollout_ref.model.enable_gradient_checkpointing=True",
+        # --- Actor optimizer ---
         f"actor_rollout_ref.actor.optim.lr={lr}",
+        f"actor_rollout_ref.actor.optim.lr_warmup_steps_ratio={warmup_ratio}",
+        f"actor_rollout_ref.actor.optim.warmup_style=constant",
+        # --- Actor training ---
         f"actor_rollout_ref.actor.ppo_mini_batch_size={batch_size}",
         f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4",
         f"actor_rollout_ref.actor.ppo_epochs={ppo_epochs}",
@@ -123,9 +133,11 @@ def build_verl_command(
         f"actor_rollout_ref.actor.entropy_coeff=0",
         f"actor_rollout_ref.actor.clip_ratio_low={clip_low}",
         f"actor_rollout_ref.actor.clip_ratio_high={clip_high}",
+        f"actor_rollout_ref.actor.grad_clip={grad_clip}",
         f"actor_rollout_ref.actor.loss_agg_mode=token-mean",
         f"actor_rollout_ref.actor.fsdp_config.param_offload=False",
         f"actor_rollout_ref.actor.fsdp_config.optimizer_offload=False",
+        # --- Rollout ---
         f"actor_rollout_ref.rollout.name={ROLLOUT_ENGINE}",
         f"actor_rollout_ref.rollout.gpu_memory_utilization=0.80",
         f"actor_rollout_ref.rollout.tensor_model_parallel_size=1",
@@ -135,16 +147,23 @@ def build_verl_command(
         f"actor_rollout_ref.rollout.load_format=safetensors",
         f"actor_rollout_ref.rollout.layered_summon=True",
         f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4",
+        # --- Ref ---
         f"actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4",
         f"actor_rollout_ref.ref.fsdp_config.param_offload=True",
+        # --- Algorithm (DAPO) ---
         f"algorithm.use_kl_in_reward=False",
         f"algorithm.kl_ctrl.kl_coef=0.0",
         f"algorithm.norm_adv_by_std_in_grpo=False",
         f"algorithm.filter_groups.enable=True",
         f"algorithm.filter_groups.metric=score",
         f"algorithm.filter_groups.max_num_gen_batches=5",
+        # --- Reward (native overlong shaping) ---
         f"custom_reward_function.path={reward_fn_path}",
         f"custom_reward_function.name=compute_score",
+        f"reward_model.overlong_buffer.enable=True",
+        f"reward_model.overlong_buffer.len={overlong_buffer_len}",
+        f"reward_model.overlong_buffer.penalty_factor={overlong_penalty}",
+        # --- Trainer ---
         f"trainer.val_before_train=False",
         f"trainer.critic_warmup=0",
         "trainer.logger=[console]",
