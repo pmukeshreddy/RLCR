@@ -121,6 +121,7 @@ def build_verl_command(
         f"actor_rollout_ref.model.lora_alpha={lora_alpha}",
         f"actor_rollout_ref.model.use_remove_padding=True",
         f"actor_rollout_ref.model.enable_gradient_checkpointing=True",
+        f"+actor_rollout_ref.model.override_config.attn_implementation=sdpa",
         # --- Actor optimizer ---
         f"actor_rollout_ref.actor.optim.lr={lr}",
         f"actor_rollout_ref.actor.optim.lr_warmup_steps_ratio={warmup_ratio}",
