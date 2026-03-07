@@ -60,7 +60,6 @@ def _make_parquet(
             "prompt": json.dumps(messages),
             "data_source": f"rlcr_{team_name}",
             "ground_truth": str(int(label)),
-            "extra_info": {"team": team_name},
         })
 
     df = pd.DataFrame(records)
