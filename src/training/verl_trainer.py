@@ -135,6 +135,7 @@ def build_verl_command(
         f"actor_rollout_ref.ref.fsdp_config.param_offload=True",
         f"algorithm.use_kl_in_reward=False",
         f"algorithm.kl_ctrl.kl_coef=0.0",
+        f"algorithm.norm_adv_by_std_in_grpo=False",
         f"custom_reward_function.path={reward_fn_path}",
         f"custom_reward_function.name=compute_score",
         f"trainer.val_before_train=False",
