@@ -177,7 +177,7 @@ training:
     vllm_gpu_memory_utilization: 0.80
     tensor_parallel_size: 1
     fsdp_param_offload: false
-    fsdp_optimizer_offload: false
+    fsdp_optimizer_offload: true
     rollout_temperature: 1.2
     rollout_top_p: 0.95
 
